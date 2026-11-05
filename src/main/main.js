@@ -106,6 +106,7 @@ function callBridge(action, params = {}) {
 
 function createWindow() {
   const iconPath = path.join(__dirname, '..', '..', 'assets', 'razerd.svg');
+  Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 820,
@@ -116,6 +117,7 @@ function createWindow() {
     icon: fs.existsSync(iconPath) ? iconPath : undefined,
     show: false,
     frame: true,
+    autoHideMenuBar: true,
     titleBarStyle: 'default',
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'preload.js'),
@@ -124,6 +126,8 @@ function createWindow() {
       sandbox: false
     }
   });
+  mainWindow.removeMenu();
+  mainWindow.setMenuBarVisibility(false);
 
   // Load renderer
   const devUrl = process.env.VITE_DEV_SERVER_URL;
