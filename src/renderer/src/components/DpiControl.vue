@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, computed } from 'vue';
+import { ref, watch, computed, onBeforeUnmount } from 'vue';
 
 const props = defineProps({
   device: {
@@ -22,86 +22,235 @@ const stages = ref(
     : [[400, 400], [800, 800], [1600, 1600], [3200, 3200], [6400, 6400]]
 );
 
+const isDragging = ref(false);
+let lastInteractionAt = 0;
+let dpiThrottleTimer = null;
+let lastDpiSentAt = 0;
+let stageThrottleTimer = null;
+let lastStageSentAt = 0;
+
+function markInteraction() {
+  lastInteractionAt = Date.now();
+}
+
+function syncFromDevice(newDev, force = false) {
+  if (!newDev) return;
+  if (!force && (isDragging.value || Date.now() - lastInteractionAt < 4000)) {
+    return;
+  }
+  if (newDev.dpi) {
+    currentX.value = newDev.dpi[0] || 1600;
+    currentY.value = newDev.dpi[1] || 1600;
+    if (newDev.dpi[0] === newDev.dpi[1]) {
+      linkXY.value = true;
+    }
+  }
+  if (newDev.dpi_stages && newDev.dpi_stages.length) {
+    stages.value = JSON.parse(JSON.stringify(newDev.dpi_stages));
+  }
+  if (newDev.active_dpi_stage) {
+    activeStage.value = newDev.active_dpi_stage;
+  }
+}
+
+watch(
+  () => props.device?.serial,
+  () => {
+    isDragging.value = false;
+    lastInteractionAt = 0;
+    syncFromDevice(props.device, true);
+  }
+);
+
 watch(
   () => props.device,
   (newDev) => {
-    if (newDev && newDev.dpi) {
-      currentX.value = newDev.dpi[0] || 1600;
-      currentY.value = newDev.dpi[1] || 1600;
-      if (newDev.dpi[0] === newDev.dpi[1]) {
-        linkXY.value = true;
-      }
-    }
-    if (newDev && newDev.dpi_stages) {
-      stages.value = JSON.parse(JSON.stringify(newDev.dpi_stages));
-    }
-    if (newDev && newDev.active_dpi_stage) {
-      activeStage.value = newDev.active_dpi_stage;
-    }
+    syncFromDevice(newDev, false);
   },
   { deep: true }
 );
 
-function onXChange(val) {
+onBeforeUnmount(() => {
+  if (dpiThrottleTimer) clearTimeout(dpiThrottleTimer);
+  if (stageThrottleTimer) clearTimeout(stageThrottleTimer);
+});
+
+function syncActiveStageSlot() {
+  const idx = activeStage.value - 1;
+  if (idx >= 0 && idx < stages.value.length) {
+    stages.value[idx] = [currentX.value, currentY.value];
+  }
+}
+
+function emitDpiThrottled(commit = false) {
+  if (commit) {
+    if (dpiThrottleTimer) {
+      clearTimeout(dpiThrottleTimer);
+      dpiThrottleTimer = null;
+    }
+    lastDpiSentAt = Date.now();
+    emit('update-dpi', {
+      serial: props.device.serial,
+      x: currentX.value,
+      y: currentY.value,
+      commit: true
+    });
+    return;
+  }
+
+  const now = Date.now();
+  const elapsed = now - lastDpiSentAt;
+  if (elapsed >= 90) {
+    lastDpiSentAt = now;
+    emit('update-dpi', {
+      serial: props.device.serial,
+      x: currentX.value,
+      y: currentY.value,
+      commit: false
+    });
+  } else if (!dpiThrottleTimer) {
+    dpiThrottleTimer = setTimeout(() => {
+      dpiThrottleTimer = null;
+      lastDpiSentAt = Date.now();
+      emit('update-dpi', {
+        serial: props.device.serial,
+        x: currentX.value,
+        y: currentY.value,
+        commit: false
+      });
+    }, 90 - elapsed);
+  }
+}
+
+function emitStagesThrottled(commit = false) {
+  if (commit) {
+    if (stageThrottleTimer) {
+      clearTimeout(stageThrottleTimer);
+      stageThrottleTimer = null;
+    }
+    lastStageSentAt = Date.now();
+    emit('update-stages', {
+      serial: props.device.serial,
+      active: activeStage.value,
+      stages: stages.value.map((s) => [s[0], s[1]]),
+      commit: true
+    });
+    return;
+  }
+
+  const now = Date.now();
+  const elapsed = now - lastStageSentAt;
+  if (elapsed >= 110) {
+    lastStageSentAt = now;
+    emit('update-stages', {
+      serial: props.device.serial,
+      active: activeStage.value,
+      stages: stages.value.map((s) => [s[0], s[1]]),
+      commit: false
+    });
+  } else if (!stageThrottleTimer) {
+    stageThrottleTimer = setTimeout(() => {
+      stageThrottleTimer = null;
+      lastStageSentAt = Date.now();
+      emit('update-stages', {
+        serial: props.device.serial,
+        active: activeStage.value,
+        stages: stages.value.map((s) => [s[0], s[1]]),
+        commit: false
+      });
+    }, 110 - elapsed);
+  }
+}
+
+function onXInput(val) {
+  isDragging.value = true;
+  markInteraction();
   const num = Math.min(maxDpi.value, Math.max(100, parseInt(val) || 100));
   currentX.value = num;
   if (linkXY.value) {
     currentY.value = num;
   }
-  applyDpi();
+  syncActiveStageSlot();
+  emitDpiThrottled(false);
 }
 
-function onYChange(val) {
+function onXCommit(val) {
+  isDragging.value = false;
+  markInteraction();
+  const num = Math.min(maxDpi.value, Math.max(100, parseInt(val) || 100));
+  currentX.value = num;
+  if (linkXY.value) {
+    currentY.value = num;
+  }
+  syncActiveStageSlot();
+  emitDpiThrottled(true);
+}
+
+function onYInput(val) {
+  isDragging.value = true;
+  markInteraction();
   const num = Math.min(maxDpi.value, Math.max(100, parseInt(val) || 100));
   currentY.value = num;
   if (linkXY.value) {
     currentX.value = num;
   }
-  applyDpi();
+  syncActiveStageSlot();
+  emitDpiThrottled(false);
 }
 
-function applyDpi() {
-  emit('update-dpi', {
-    serial: props.device.serial,
-    x: currentX.value,
-    y: currentY.value
-  });
+function onYCommit(val) {
+  isDragging.value = false;
+  markInteraction();
+  const num = Math.min(maxDpi.value, Math.max(100, parseInt(val) || 100));
+  currentY.value = num;
+  if (linkXY.value) {
+    currentX.value = num;
+  }
+  syncActiveStageSlot();
+  emitDpiThrottled(true);
 }
 
 function setQuickPreset(val) {
+  markInteraction();
   currentX.value = val;
   currentY.value = val;
-  applyDpi();
+  syncActiveStageSlot();
+  emitDpiThrottled(true);
 }
 
 function selectStage(index) {
+  markInteraction();
   activeStage.value = index + 1;
   const stageVal = stages.value[index];
   if (stageVal) {
     currentX.value = stageVal[0];
     currentY.value = stageVal[1];
-    applyDpi();
   }
-  saveStages();
+  emitStagesThrottled(true);
 }
 
-function updateStageVal(index, val) {
+function onStageInput(index, val) {
+  isDragging.value = true;
+  markInteraction();
   const num = Math.min(maxDpi.value, Math.max(100, parseInt(val) || 100));
   stages.value[index] = [num, num];
   if (activeStage.value === index + 1) {
     currentX.value = num;
     currentY.value = num;
-    applyDpi();
   }
-  saveStages();
+  emitStagesThrottled(false);
 }
 
-function saveStages() {
-  emit('update-stages', {
-    serial: props.device.serial,
-    active: activeStage.value,
-    stages: stages.value
-  });
+function onStageCommit(index, val) {
+  isDragging.value = false;
+  markInteraction();
+  const num = Math.min(maxDpi.value, Math.max(100, parseInt(val) || 100));
+  stages.value[index] = [num, num];
+  if (activeStage.value === index + 1) {
+    currentX.value = num;
+    currentY.value = num;
+  }
+  emitStagesThrottled(true);
 }
 </script>
 
@@ -133,7 +282,10 @@ function saveStages() {
           :max="maxDpi"
           step="50"
           :value="currentX"
-          @input="onXChange($event.target.value)"
+          @pointerdown="isDragging = true"
+          @pointerup="isDragging = false"
+          @input="onXInput($event.target.value)"
+          @change="onXCommit($event.target.value)"
         />
       </div>
 
@@ -148,7 +300,10 @@ function saveStages() {
           :max="maxDpi"
           step="50"
           :value="currentY"
-          @input="onYChange($event.target.value)"
+          @pointerdown="isDragging = true"
+          @pointerup="isDragging = false"
+          @input="onYInput($event.target.value)"
+          @change="onYCommit($event.target.value)"
         />
       </div>
 
@@ -195,7 +350,11 @@ function saveStages() {
             :max="maxDpi"
             step="50"
             :value="st[0]"
-            @input.stop="updateStageVal(idx, $event.target.value)"
+            @click.stop
+            @pointerdown.stop="isDragging = true"
+            @pointerup.stop="isDragging = false"
+            @input.stop="onStageInput(idx, $event.target.value)"
+            @change.stop="onStageCommit(idx, $event.target.value)"
           />
         </div>
       </div>

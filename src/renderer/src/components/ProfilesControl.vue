@@ -1,120 +1,58 @@
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref } from 'vue';
 
 const props = defineProps({
   currentDevice: {
     type: Object,
     default: null
+  },
+  profiles: {
+    type: Array,
+    required: true
+  },
+  activeProfileId: {
+    type: String,
+    required: true
   }
 });
 
-const emit = defineEmits(['apply-profile']);
+const emit = defineEmits([
+  'apply-profile',
+  'create-profile',
+  'delete-profile',
+  'reset-profile',
+  'import-profiles'
+]);
 
-const DEFAULT_PROFILES = [
-  {
-    id: 'prof-comp',
-    name: 'Competitive FPS',
-    desc: 'High refresh rate, 800/1600 DPI stage, zero latency, static monochrome lighting.',
-    dpi: [1600, 1600],
-    poll_rate: 8000,
-    brightness: 80,
-    effect: 'static',
-    colors: ['#fafafa'],
-    idle_time: 15
-  },
-  {
-    id: 'prof-stealth',
-    name: 'Stealth Night',
-    desc: 'Low power, minimal distraction, illumination turned off, extended standby timeout.',
-    dpi: [1200, 1200],
-    poll_rate: 1000,
-    brightness: 0,
-    effect: 'none',
-    colors: ['#000000'],
-    idle_time: 5
-  },
-  {
-    id: 'prof-office',
-    name: 'Work & Studio',
-    desc: 'Balanced 1600 DPI, 1000 Hz reporting rate, clean white subtle breathing glow.',
-    dpi: [1600, 1600],
-    poll_rate: 1000,
-    brightness: 50,
-    effect: 'breath',
-    colors: ['#fafafa'],
-    idle_time: 10
-  },
-  {
-    id: 'prof-chroma',
-    name: 'Chroma Neon',
-    desc: 'Dynamic spectrum cycling effect at 100% brightness with full RGB expression.',
-    dpi: [1600, 1600],
-    poll_rate: 1000,
-    brightness: 100,
-    effect: 'spectrum',
-    colors: ['#4ade80'],
-    idle_time: 15
-  }
-];
-
-const profiles = ref([]);
-const activeProfileId = ref('prof-comp');
 const newProfileName = ref('');
+const cloneCurrent = ref(true);
 const isCreating = ref(false);
 
-onMounted(() => {
-  const saved = localStorage.getItem('razerd-profiles');
-  if (saved) {
-    try {
-      profiles.value = JSON.parse(saved);
-    } catch {
-      profiles.value = [...DEFAULT_PROFILES];
-    }
-  } else {
-    profiles.value = [...DEFAULT_PROFILES];
-    saveToStorage();
-  }
-});
-
-function saveToStorage() {
-  localStorage.setItem('razerd-profiles', JSON.stringify(profiles.value));
-}
-
 function applyProfile(prof) {
-  activeProfileId.value = prof.id;
   emit('apply-profile', prof);
 }
 
 function createProfile() {
   const name = newProfileName.value.trim();
   if (!name) return;
-
-  const newProf = {
-    id: `prof-${Date.now()}`,
+  emit('create-profile', {
     name,
-    desc: 'Custom user-saved peripheral profile.',
-    dpi: props.currentDevice?.dpi ? [...props.currentDevice.dpi] : [1600, 1600],
-    poll_rate: props.currentDevice?.poll_rate || 1000,
-    brightness: props.currentDevice?.brightness || 100,
-    effect: props.currentDevice?.lighting?.current_effect || 'static',
-    colors: props.currentDevice?.lighting?.colors || ['#fafafa'],
-    idle_time: props.currentDevice?.idle_time || 15
-  };
-
-  profiles.value.unshift(newProf);
-  saveToStorage();
+    cloneCurrent: cloneCurrent.value
+  });
   newProfileName.value = '';
   isCreating.value = false;
-  applyProfile(newProf);
 }
 
 function deleteProfile(id) {
-  profiles.value = profiles.value.filter(p => p.id !== id);
-  saveToStorage();
+  emit('delete-profile', id);
+}
+
+function resetProfile(id) {
+  emit('reset-profile', id);
 }
 
 function exportProfiles() {
-  const data = JSON.stringify(profiles.value, null, 2);
+  const data = JSON.stringify(props.profiles, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -131,9 +69,8 @@ function importProfiles(e) {
   reader.onload = (event) => {
     try {
       const parsed = JSON.parse(event.target.result);
-      if (Array.isArray(parsed)) {
-        profiles.value = parsed;
-        saveToStorage();
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        emit('import-profiles', parsed);
       }
     } catch (err) {
       alert('Failed to parse profiles JSON: ' + err.message);
@@ -148,7 +85,9 @@ function importProfiles(e) {
     <div class="section-header">
       <div>
         <h2 class="section-title">Hardware Profiles</h2>
-        <p class="section-desc">Save and activate hardware performance and Chroma lighting presets.</p>
+        <p class="section-desc">
+          Switch profiles to load saved settings. All changes you make to DPI, polling rate, lighting, buttons, or power are automatically saved to the currently active profile.
+        </p>
       </div>
       <div class="profile-actions">
         <label class="btn btn--secondary btn--small" title="Import JSON profiles">
@@ -164,16 +103,22 @@ function importProfiles(e) {
 
     <!-- Create Profile Drawer -->
     <div v-if="isCreating" class="box create-drawer">
-      <span class="micro">Capture Current Configuration</span>
+      <div class="create-top">
+        <span class="micro">Create New Profile</span>
+        <label class="clone-toggle micro">
+          <input type="checkbox" v-model="cloneCurrent" />
+          <span>Copy current device settings (uncheck for clean 800 DPI default)</span>
+        </label>
+      </div>
       <div class="create-form">
         <input
           type="text"
           class="input"
           v-model="newProfileName"
-          placeholder="Profile Name (e.g. Counter-Strike 2, Lightroom)"
+          placeholder="Profile Name (e.g. Counter-Strike 2, Desktop)"
           @keydown.enter="createProfile"
         />
-        <button class="btn btn--primary btn--small" @click="createProfile">Save</button>
+        <button class="btn btn--primary btn--small" @click="createProfile">Create & Activate</button>
       </div>
     </div>
 
@@ -184,15 +129,24 @@ function importProfiles(e) {
         :key="prof.id"
         class="profile-card"
         :class="{ 'profile-card--active': activeProfileId === prof.id }"
+        @click="applyProfile(prof)"
       >
         <div class="profile-top">
           <div class="profile-title-row">
             <span class="profile-name">{{ prof.name }}</span>
-            <span v-if="activeProfileId === prof.id" class="active-tag micro">Active</span>
+            <span v-if="activeProfileId === prof.id" class="active-tag micro">Active · Auto-Saving</span>
           </div>
           <div class="profile-btns">
             <button
-              v-if="!prof.id.startsWith('prof-comp') && !prof.id.startsWith('prof-stealth')"
+              v-if="prof.id === 'prof-default'"
+              class="btn btn--secondary btn--small"
+              title="Reset Default profile back to 800 DPI"
+              @click.stop="resetProfile(prof.id)"
+            >
+              Reset to 800 DPI
+            </button>
+            <button
+              v-if="prof.id !== 'prof-default' && profiles.length > 1"
               class="btn btn--danger btn--small"
               @click.stop="deleteProfile(prof.id)"
             >
@@ -201,9 +155,9 @@ function importProfiles(e) {
             <button
               class="btn btn--secondary btn--small"
               :class="{ 'btn--primary': activeProfileId === prof.id }"
-              @click="applyProfile(prof)"
+              @click.stop="applyProfile(prof)"
             >
-              {{ activeProfileId === prof.id ? 'Applied' : 'Apply' }}
+              {{ activeProfileId === prof.id ? 'Active' : 'Switch' }}
             </button>
           </div>
         </div>
@@ -211,10 +165,13 @@ function importProfiles(e) {
         <p class="profile-desc">{{ prof.desc }}</p>
 
         <div class="profile-specs micro num">
-          <span v-if="prof.dpi">DPI {{ prof.dpi[0] }}</span>
+          <span v-if="prof.dpi">DPI {{ prof.dpi[0] }}{{ prof.dpi[0] !== prof.dpi[1] ? ` × ${prof.dpi[1]}` : '' }}</span>
           <span v-if="prof.poll_rate">POLL {{ prof.poll_rate }}Hz</span>
           <span v-if="prof.effect">EFFECT {{ prof.effect.toUpperCase() }}</span>
           <span v-if="prof.brightness !== undefined">BRIGHT {{ prof.brightness }}%</span>
+          <span v-if="Array.isArray(prof.button_mappings) && prof.button_mappings.some((b) => b.action !== 'default')">
+            {{ prof.button_mappings.filter((b) => b.action !== 'default').length }} CUSTOM BUTTONS
+          </span>
         </div>
       </div>
     </div>
@@ -232,6 +189,7 @@ function importProfiles(e) {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 16px;
 }
 
 .section-title {
@@ -250,12 +208,29 @@ function importProfiles(e) {
 .profile-actions {
   display: flex;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .create-drawer {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.create-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.clone-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text-2);
 }
 
 .create-form {
@@ -274,6 +249,7 @@ function importProfiles(e) {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 20px;
+  cursor: pointer;
   transition: background-color 120ms, border-color 120ms;
 }
 
@@ -325,6 +301,7 @@ function importProfiles(e) {
 
 .profile-specs {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   color: var(--text-3);
   padding-top: 12px;

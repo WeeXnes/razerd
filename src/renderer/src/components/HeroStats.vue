@@ -3,8 +3,14 @@ defineProps({
   device: {
     type: Object,
     default: null
+  },
+  activeProfile: {
+    type: Object,
+    default: null
   }
 });
+
+const emit = defineEmits(['open-profiles']);
 </script>
 
 <template>
@@ -33,6 +39,11 @@ defineProps({
       <div class="micro">Brightness</div>
     </div>
 
+    <div v-if="activeProfile" class="hero-stat hero-stat--clickable" @click="emit('open-profiles')" title="Click to switch profiles">
+      <div class="hero-stat__val micro-val">{{ activeProfile.name }}</div>
+      <div class="micro">Active Profile</div>
+    </div>
+
     <div class="hero-stat">
       <div class="hero-stat__val micro-val num">{{ device.firmware || 'v1.0' }}</div>
       <div class="micro">Firmware</div>
@@ -53,6 +64,15 @@ defineProps({
 .hero-stat {
   display: flex;
   flex-direction: column;
+}
+
+.hero-stat--clickable {
+  cursor: pointer;
+  transition: opacity 120ms;
+}
+
+.hero-stat--clickable:hover {
+  opacity: 0.75;
 }
 
 .hero-stat__val {

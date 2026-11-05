@@ -8,11 +8,13 @@ let tray = null;
 let pyProcess = null;
 let pyReader = null;
 let reqCounter = 0;
+let lastMutationAt = 0;
+let inFlightMutations = 0;
 const pendingRequests = new Map();
 
 function startPythonBridge() {
   const scriptPath = path.join(__dirname, '..', 'bridge', 'bridge.py');
-  pyProcess = spawn('python3', [scriptPath], {
+  pyProcess = spawn('python3', ['-u', scriptPath], {
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
@@ -62,12 +64,35 @@ function jsonParseSafe(str) {
 }
 
 function callBridge(action, params = {}) {
+  const isMutation = action !== 'list_devices' && action !== 'get_status';
+  if (isMutation) {
+    inFlightMutations++;
+    lastMutationAt = Date.now();
+  }
   return new Promise((resolve, reject) => {
     if (!pyProcess || pyProcess.killed) {
+      if (isMutation) {
+        inFlightMutations = Math.max(0, inFlightMutations - 1);
+      }
       return reject(new Error('Bridge is not running'));
     }
     const id = ++reqCounter;
-    pendingRequests.set(id, { resolve, reject });
+    pendingRequests.set(id, {
+      resolve: (val) => {
+        if (isMutation) {
+          inFlightMutations = Math.max(0, inFlightMutations - 1);
+          lastMutationAt = Date.now();
+        }
+        resolve(val);
+      },
+      reject: (err) => {
+        if (isMutation) {
+          inFlightMutations = Math.max(0, inFlightMutations - 1);
+          lastMutationAt = Date.now();
+        }
+        reject(err);
+      }
+    });
     const payload = JSON.stringify({ id, action, params }) + '\n';
     pyProcess.stdin.write(payload);
   });
@@ -137,13 +162,18 @@ ipcMain.handle('window:isMaximized', () => {
 let pollTimer = null;
 function startDevicePolling() {
   pollTimer = setInterval(async () => {
+    if (inFlightMutations > 0 || Date.now() - lastMutationAt < 4000) {
+      return;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       try {
         const devices = await callBridge('list_devices');
-        mainWindow.webContents.send('razer:deviceUpdate', devices);
+        if (inFlightMutations === 0 && Date.now() - lastMutationAt >= 4000 && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('razer:deviceUpdate', devices);
+        }
       } catch {}
     }
-  }, 3500);
+  }, 4500);
 }
 
 app.whenReady().then(() => {

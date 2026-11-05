@@ -12,39 +12,77 @@ const emit = defineEmits(['update-power']);
 
 const idleTime = ref(props.device.idle_time || 15);
 const lowBattery = ref(props.device.low_battery_threshold || 10);
+const isDragging = ref(false);
+let lastInteractionAt = 0;
+
+function markInteraction() {
+  lastInteractionAt = Date.now();
+}
+
+function syncFromDevice(newDev, force = false) {
+  if (!newDev) return;
+  if (!force && (isDragging.value || Date.now() - lastInteractionAt < 4000)) {
+    return;
+  }
+  if (newDev.idle_time !== null && newDev.idle_time !== undefined) {
+    idleTime.value = newDev.idle_time;
+  }
+  if (newDev.low_battery_threshold !== null && newDev.low_battery_threshold !== undefined) {
+    lowBattery.value = newDev.low_battery_threshold;
+  }
+}
+
+watch(
+  () => props.device?.serial,
+  () => {
+    isDragging.value = false;
+    lastInteractionAt = 0;
+    syncFromDevice(props.device, true);
+  }
+);
 
 watch(
   () => props.device,
   (newDev) => {
-    if (newDev) {
-      if (newDev.idle_time !== null && newDev.idle_time !== undefined) {
-        idleTime.value = newDev.idle_time;
-      }
-      if (newDev.low_battery_threshold !== null && newDev.low_battery_threshold !== undefined) {
-        lowBattery.value = newDev.low_battery_threshold;
-      }
-    }
+    syncFromDevice(newDev, false);
   },
   { deep: true }
 );
 
-function onIdleChange(val) {
-  const num = parseInt(val) || 15;
-  idleTime.value = num;
-  applyPower();
+function onIdleInput(val) {
+  isDragging.value = true;
+  markInteraction();
+  idleTime.value = parseInt(val) || 15;
+  applyPower(false);
 }
 
-function onThresholdChange(val) {
-  const num = parseInt(val) || 10;
-  lowBattery.value = num;
-  applyPower();
+function onIdleCommit(val) {
+  isDragging.value = false;
+  markInteraction();
+  idleTime.value = parseInt(val) || 15;
+  applyPower(true);
 }
 
-function applyPower() {
+function onThresholdInput(val) {
+  isDragging.value = true;
+  markInteraction();
+  lowBattery.value = parseInt(val) || 10;
+  applyPower(false);
+}
+
+function onThresholdCommit(val) {
+  isDragging.value = false;
+  markInteraction();
+  lowBattery.value = parseInt(val) || 10;
+  applyPower(true);
+}
+
+function applyPower(commit = true) {
   emit('update-power', {
     serial: props.device.serial,
     idle_time: idleTime.value,
-    low_battery_threshold: lowBattery.value
+    low_battery_threshold: lowBattery.value,
+    commit
   });
 }
 </script>
@@ -96,7 +134,10 @@ function applyPower() {
           max="15"
           step="1"
           :value="idleTime"
-          @input="onIdleChange($event.target.value)"
+          @pointerdown="isDragging = true"
+          @pointerup="isDragging = false"
+          @input="onIdleInput($event.target.value)"
+          @change="onIdleCommit($event.target.value)"
         />
       </div>
 
@@ -117,7 +158,10 @@ function applyPower() {
           max="30"
           step="1"
           :value="lowBattery"
-          @input="onThresholdChange($event.target.value)"
+          @pointerdown="isDragging = true"
+          @pointerup="isDragging = false"
+          @input="onThresholdInput($event.target.value)"
+          @change="onThresholdCommit($event.target.value)"
         />
       </div>
     </div>
