@@ -1,7 +1,13 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { spawn } = require('child_process');
 const readline = require('readline');
+
+app.setName('razerd');
+if (process.platform === 'linux' && typeof app.setDesktopName === 'function') {
+  app.setDesktopName('razerd.desktop');
+}
 
 let mainWindow = null;
 let tray = null;
@@ -99,6 +105,7 @@ function callBridge(action, params = {}) {
 }
 
 function createWindow() {
+  const iconPath = path.join(__dirname, '..', '..', 'assets', 'razerd.svg');
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 820,
@@ -106,6 +113,7 @@ function createWindow() {
     minHeight: 640,
     backgroundColor: '#000000',
     title: 'razerd',
+    icon: fs.existsSync(iconPath) ? iconPath : undefined,
     show: false,
     frame: true,
     titleBarStyle: 'default',

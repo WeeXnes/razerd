@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#141414" />
+      <stop offset="100%" stop-color="#050505" />
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="48" y1="40" x2="208" y2="216" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4ade80" />
+      <stop offset="100%" stop-color="#16a34a" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Outer Dark Carbon Squircle -->
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bgGrad)" stroke="#262626" stroke-width="4" />
+
+  <!-- Subtle Inner Telemetry Frame -->
+  <rect x="28" y="28" width="200" height="200" rx="38" stroke="#1f1f1f" stroke-width="1.5" stroke-dasharray="6 6" />
+
+  <!-- Corner Telemetry Ticks -->
+  <path d="M48 64 V48 H64" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.65" />
+  <path d="M208 64 V48 H192" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.65" />
+  <path d="M48 192 V208 H64" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.65" />
+  <path d="M208 192 V208 H192" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.65" />
+
+  <!-- Center Geometric R / Lightning Hardware Emblem -->
+  <g filter="url(#glow)">
+    <path
+      d="M82 68 H146 C168 68 182 82 182 102 C182 119 171 131 153 135 L184 188 H155 L127 138 H108 V188 H82 V68 Z M108 90 V116 H142 C151 116 157 110 157 103 C157 96 151 90 142 90 H108 Z"
+      fill="url(#accentGrad)"
+    />
+  </g>
+
+  <!-- Active Telemetry Status Dot -->
+  <circle cx="196" cy="196" r="7" fill="#4ade80" />
+</svg>

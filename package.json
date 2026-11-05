@@ -5,11 +5,14 @@
   "main": "src/main/main.js",
   "scripts": {
     "dev": "vite",
-    "electron:dev": "VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "electron:dev": "VITE_DEV_SERVER_URL=http://localhost:5173 bash ./scripts/run-electron.sh",
     "build": "vite build",
-    "start": "electron .",
+    "start": "bash ./scripts/run-electron.sh",
     "test": "node test/verify.mjs",
-    "dist": "npm run build && electron ."
+    "dist": "npm run build && bash ./scripts/run-electron.sh",
+    "install:desktop": "node scripts/install-desktop.mjs",
+    "uninstall:desktop": "node scripts/install-desktop.mjs --uninstall",
+    "postinstall": "node scripts/install-desktop.mjs"
   },
   "keywords": [
     "openrazer",
