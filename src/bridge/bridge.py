@@ -503,7 +503,9 @@ class RazerBridge:
         self.device_state_cache = {}
         self.config_dir = os.path.expanduser("~/.config/razerd")
         self.mappings_file = os.path.join(self.config_dir, "button_mappings.json")
+        self.lighting_file = os.path.join(self.config_dir, "lighting_state.json")
         self.button_mappings = self._load_button_mappings()
+        self._load_lighting_state()
         self.active_remappers = {}
         self.argb_animators = {}
         self.argb_write_lock = threading.Lock()
@@ -551,6 +553,31 @@ class RazerBridge:
         except Exception as e:
             sys.stderr.write(f"Error saving button mappings: {e}\n")
 
+    def _load_lighting_state(self):
+        if os.path.exists(self.lighting_file):
+            try:
+                with open(self.lighting_file, "r") as f:
+                    saved = json.load(f)
+                if isinstance(saved, dict):
+                    for serial, lstate in saved.items():
+                        cache = self.device_state_cache.setdefault(serial, {})
+                        cache["user_set_lighting"] = True
+                        cache["lighting"] = dict(lstate)
+            except Exception:
+                pass
+
+    def _save_lighting_state(self):
+        try:
+            os.makedirs(self.config_dir, exist_ok=True)
+            out = {}
+            for serial, cache in self.device_state_cache.items():
+                if cache.get("user_set_lighting") and "lighting" in cache:
+                    out[serial] = cache["lighting"]
+            with open(self.lighting_file, "w") as f:
+                json.dump(out, f, indent=2)
+        except Exception as e:
+            sys.stderr.write(f"Error saving lighting state: {e}\n")
+
     def stop_all_remappers(self):
         for serial, remapper in list(self.active_remappers.items()):
             try:
@@ -595,85 +622,110 @@ class RazerBridge:
         if anim:
             anim.stop()
 
-    def _write_argb_raw_rows(self, serial, row_rgb_buffers, latch_custom=True):
+    def _get_argb_channel_sizes(self, serial, sysfs_dir=None, force=False):
+        cache = self.device_state_cache.setdefault(serial, {})
+        if not force and "channel_sizes" in cache:
+            return cache["channel_sizes"]
+        sizes = [14] * 6
+        if not sysfs_dir:
+            sysfs_dir = self._find_argb_sysfs_dir(serial)
+        if sysfs_dir:
+            for ch in range(1, 7):
+                sz_file = os.path.join(sysfs_dir, f"channel{ch}_size")
+                if os.path.exists(sz_file):
+                    try:
+                        with open(sz_file, "r") as f:
+                            val = int(f.read().strip() or "14")
+                        if 1 <= val <= 80:
+                            sizes[ch - 1] = val
+                    except Exception:
+                        pass
+        cache["channel_sizes"] = sizes
+        return sizes
+
+    def _write_argb_raw_rows(self, serial, row_rgb_buffers, latch_custom=False):
         """
         Writes 6 ARGB channel frames one row at a time to matrix_custom_frame.
         Each write must contain a single row [row_id, 0, stop_col, ...rgb...]
-        because razeraccessory_driver.c has an early 'return count;' after the first row.
+        where stop_col = channel_size - 1.
+        IMPORTANT: Do NOT write to matrix_effect_custom (0x0F, 0x02, 0x08) afterwards,
+        because on 1532:0F1F that command clears the streamed ARGB buffer to black!
         """
         with self.argb_write_lock:
+            cache = self.device_state_cache.setdefault(serial, {})
+            cache["last_argb_rows"] = list(row_rgb_buffers)
             sysfs_dir = self._find_argb_sysfs_dir(serial)
             if sysfs_dir:
+                ch_sizes = self._get_argb_channel_sizes(serial, sysfs_dir)
                 mcf = os.path.join(sysfs_dir, "matrix_custom_frame")
                 for row_idx, rgb_bytes in enumerate(row_rgb_buffers):
-                    count_leds = max(1, min(80, len(rgb_bytes) // 3))
+                    ch_sz = ch_sizes[row_idx] if row_idx < len(ch_sizes) else 14
+                    avail_leds = max(1, len(rgb_bytes) // 3)
+                    count_leds = max(1, min(ch_sz, avail_leds))
                     payload = bytes([row_idx, 0, count_leds - 1]) + rgb_bytes[:count_leds * 3]
                     with open(mcf, "wb") as f:
                         f.write(payload)
-                if latch_custom:
-                    mec = os.path.join(sysfs_dir, "matrix_effect_custom")
-                    if os.path.exists(mec):
-                        try:
-                            with open(mec, "wb") as f:
-                                f.write(b"1")
-                        except Exception:
-                            pass
                 return True
 
-            # Fallback via OpenRazer DBus setKeyRow one row at a time
+            # Fallback via OpenRazer DBus setKeyRow one row at a time (without setCustom)
             rdev = self._find_rdevice(serial)
             if rdev and getattr(rdev, "fx", None) and getattr(rdev.fx, "advanced", None):
+                ch_sizes = self._get_argb_channel_sizes(serial)
                 for row_idx, rgb_bytes in enumerate(row_rgb_buffers):
-                    count_leds = max(1, min(80, len(rgb_bytes) // 3))
+                    ch_sz = ch_sizes[row_idx] if row_idx < len(ch_sizes) else 14
+                    count_leds = max(1, min(ch_sz, len(rgb_bytes) // 3))
                     payload = bytes([row_idx, 0, count_leds - 1]) + rgb_bytes[:count_leds * 3]
                     rdev.fx.advanced._lighting_dbus.setKeyRow(payload)
-                if latch_custom:
-                    rdev.fx.advanced._lighting_dbus.setCustom()
                 return True
         return False
+
+    def _ensure_argb_hw_ready(self, serial):
+        cache = self.device_state_cache.setdefault(serial, {})
+        if cache.get("argb_hw_init"):
+            return
+        sysfs_dir = self._find_argb_sysfs_dir(serial)
+        if not sysfs_dir:
+            return
+        try:
+            dm = os.path.join(sysfs_dir, "device_mode")
+            if os.path.exists(dm):
+                with open(dm, "rb") as f:
+                    cur_mode = f.read()
+                if not cur_mode or cur_mode[0] != 3:
+                    with open(dm, "wb") as f:
+                        f.write(b"\x03\x00")
+        except Exception:
+            pass
+        try:
+            for ch in range(1, 7):
+                br_file = os.path.join(sysfs_dir, f"channel{ch}_led_brightness")
+                if os.path.exists(br_file):
+                    with open(br_file, "r") as f:
+                        val = int(f.read().strip() or "0")
+                    if val < 15:
+                        with open(br_file, "w") as f:
+                            f.write("255")
+        except Exception:
+            pass
+        self._get_argb_channel_sizes(serial, sysfs_dir, force=True)
+        cache["argb_hw_init"] = True
 
     def _drive_argb_effect(self, rdev, effect, rgb_colors, speed="normal", direction="right", breath_mode="single"):
         serial = rdev.serial
         self._stop_argb_animator(serial)
 
-        # Ensure ARGB controller is in Driver Mode (0x03, 0x00) and channels have non-zero brightness when active
-        sysfs_dir = self._find_argb_sysfs_dir(serial)
-        if sysfs_dir and effect != "none":
-            try:
-                dm = os.path.join(sysfs_dir, "device_mode")
-                if os.path.exists(dm):
-                    with open(dm, "rb") as f:
-                        cur_mode = f.read()
-                    if not cur_mode or cur_mode[0] != 3:
-                        with open(dm, "wb") as f:
-                            f.write(b"\x03\x00")
-            except Exception:
-                pass
-            try:
-                for ch in range(1, 7):
-                    br_file = os.path.join(sysfs_dir, f"channel{ch}_led_brightness")
-                    if os.path.exists(br_file):
-                        with open(br_file, "r") as f:
-                            val = int(f.read().strip() or "0")
-                        if val < 15:
-                            with open(br_file, "w") as f:
-                                f.write("255")
-            except Exception:
-                pass
+        if effect != "none":
+            self._ensure_argb_hw_ready(serial)
 
         cols = 80
         rows = 6
         if effect == "none":
             off_row = bytes([0, 0, 0]) * cols
-            self._write_argb_raw_rows(serial, [off_row for _ in range(rows)], latch_custom=True)
-        elif effect in ("static", "reactive", "ripple", "starlight"):
+            self._write_argb_raw_rows(serial, [off_row for _ in range(rows)])
+        elif effect in ("static", "reactive", "ripple", "starlight", "matrix"):
             r, g, b = rgb_colors[0]
             static_row = bytes([r, g, b]) * cols
-            self._write_argb_raw_rows(serial, [static_row for _ in range(rows)], latch_custom=True)
-        elif effect == "matrix":
-            r, g, b = rgb_colors[0]
-            static_row = bytes([r, g, b]) * cols
-            self._write_argb_raw_rows(serial, [static_row for _ in range(rows)], latch_custom=True)
+            self._write_argb_raw_rows(serial, [static_row for _ in range(rows)])
         elif effect in ("spectrum", "wave", "breath", "wheel"):
             eff_type = "wave" if effect == "wheel" else effect
             anim = ArgbEffectAnimator(self, serial, eff_type, rgb_colors, speed, direction, breath_mode)
@@ -902,22 +954,31 @@ class RazerBridge:
             zones.append("backlight")
         return zones
 
-    def _get_argb_channels(self, rdevice):
+    def _get_argb_channels(self, rdevice, force=False):
+        serial = rdevice.serial
+        cache = self.device_state_cache.setdefault(serial, {})
+        if not force and "channels" in cache:
+            return cache["channels"]
         channels = []
         try:
             avail = getattr(rdevice, "_available_features", {})
             if "razer.device.lighting.channel" in avail:
                 ch_iface = dbus.Interface(rdevice._dbus, "razer.device.lighting.channel")
                 num_ch = int(ch_iface.getNumChannels())
+                sizes = []
                 for i in range(1, num_ch + 1):
                     sz = int(ch_iface.getChannelSize(i))
                     br = round(float(ch_iface.getChannelBrightness(i)))
+                    sizes.append(sz if 1 <= sz <= 80 else 14)
                     channels.append({
                         "channel": i,
                         "name": f"ARGB Header {i}",
                         "size": sz,
                         "brightness": br
                     })
+                if len(sizes) == 6:
+                    cache["channel_sizes"] = sizes
+                cache["channels"] = channels
         except Exception as e:
             sys.stderr.write(f"Error reading ARGB channels: {e}\n")
         return channels
@@ -1382,6 +1443,10 @@ class RazerBridge:
                         ztarget.brightness = brightness
                 elif rdev.has("brightness"):
                     rdev.brightness = brightness
+                if self._is_argb_controller(rdev) and serial not in self.argb_animators:
+                    last_rows = self.device_state_cache.get(serial, {}).get("last_argb_rows")
+                    if last_rows:
+                        self._write_argb_raw_rows(serial, last_rows)
             except Exception as e:
                 sys.stderr.write(f"Error setting brightness: {e}\n")
         self.device_state_cache.setdefault(serial, {})["brightness"] = round(brightness)
@@ -1390,6 +1455,7 @@ class RazerBridge:
     def set_channel(self, serial, channel, brightness=None, size=None):
         channel = int(channel)
         rdev = self._find_rdevice(serial)
+        cache = self.device_state_cache.setdefault(serial, {})
         if rdev:
             try:
                 avail = getattr(rdev, "_available_features", {})
@@ -1397,15 +1463,25 @@ class RazerBridge:
                     ch_iface = dbus.Interface(rdev._dbus, "razer.device.lighting.channel")
                     if brightness is not None:
                         ch_iface.setChannelBrightness(channel, float(brightness))
+                        if "channels" in cache and 1 <= channel <= len(cache["channels"]):
+                            cache["channels"][channel - 1]["brightness"] = round(float(brightness))
                     if size is not None:
-                        ch_iface.setChannelSize(channel, int(size))
-                        # Re-apply current ARGB effect if size changed and not animated
-                        if self._is_argb_controller(rdev) and serial not in self.argb_animators:
-                            cache_l = self.device_state_cache.get(serial, {}).get("lighting", {})
+                        sz_val = max(1, min(80, int(size)))
+                        ch_iface.setChannelSize(channel, sz_val)
+                        if "channel_sizes" in cache and 1 <= channel <= len(cache["channel_sizes"]):
+                            cache["channel_sizes"][channel - 1] = sz_val
+                        if "channels" in cache and 1 <= channel <= len(cache["channels"]):
+                            cache["channels"][channel - 1]["size"] = sz_val
+                    # Re-apply current ARGB frame if not animated so hardware register writes don't clear LEDs
+                    if self._is_argb_controller(rdev) and serial not in self.argb_animators:
+                        last_rows = cache.get("last_argb_rows")
+                        if last_rows:
+                            self._write_argb_raw_rows(serial, last_rows)
+                        else:
+                            cache_l = cache.get("lighting", {})
                             eff = cache_l.get("current_effect", "static")
                             cols = [self._hex_to_rgb(c) for c in cache_l.get("colors", ["#fafafa", "#4ade80"])]
-                            if eff in ("static", "none"):
-                                self._drive_argb_effect(rdev, eff, cols)
+                            self._drive_argb_effect(rdev, eff, cols)
             except Exception as e:
                 sys.stderr.write(f"Error configuring ARGB channel {channel}: {e}\n")
                 return {"status": "error", "message": str(e)}
@@ -1517,6 +1593,7 @@ class RazerBridge:
             "direction": direction,
             "zone": zone
         })
+        self._save_lighting_state()
         return {"status": "ok", "effect": effect, "colors": colors, "breath_mode": breath_mode}
 
     def set_matrix(self, serial, grid):
