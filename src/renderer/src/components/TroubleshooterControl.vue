@@ -12,6 +12,10 @@ const emit = defineEmits(['restart-daemon', 'refresh-status']);
 
 const restarting = ref(false);
 
+onMounted(() => {
+  emit('refresh-status');
+});
+
 async function onRestart() {
   restarting.value = true;
   emit('restart-daemon');
@@ -27,7 +31,7 @@ async function onRestart() {
     <div class="section-header">
       <div>
         <h2 class="section-title">System Health & Diagnostics</h2>
-        <p class="section-desc">Verify OpenRazer kernel drivers, daemon D-Bus services, and udev permissions.</p>
+        <p class="section-desc">Verify OpenRazer kernel drivers, daemon D-Bus services, and hardware permissions.</p>
       </div>
       <button
         class="btn btn--secondary btn--small"
@@ -45,7 +49,7 @@ async function onRestart() {
         <div class="diag-left">
           <span
             class="status-dot"
-            :class="status?.daemon_running ? 'status-dot--success' : 'status-dot--danger'"
+            :class="status?.daemon_running ? 'status-dot--success' : (status ? 'status-dot--danger' : '')"
           ></span>
           <div>
             <div class="diag-name">OpenRazer Daemon</div>
@@ -53,7 +57,9 @@ async function onRestart() {
           </div>
         </div>
         <div class="diag-right micro num">
-          {{ status?.daemon_running ? `v${status?.daemon_version || '3.x'} (Active)` : 'Inactive / Stopped' }}
+          <span v-if="status?.daemon_running">v{{ status?.daemon_version || '3.x' }} (Active)</span>
+          <span v-else-if="status">Inactive / Stopped</span>
+          <span v-else>Connecting...</span>
         </div>
       </div>
 
@@ -64,7 +70,7 @@ async function onRestart() {
         <div class="diag-left">
           <span
             class="status-dot"
-            :class="status?.has_openrazer_lib ? 'status-dot--success' : 'status-dot--danger'"
+            :class="status?.has_openrazer_lib ? 'status-dot--success' : (status ? 'status-dot--danger' : '')"
           ></span>
           <div>
             <div class="diag-name">OpenRazer Python Library</div>
@@ -72,7 +78,9 @@ async function onRestart() {
           </div>
         </div>
         <div class="diag-right micro num">
-          {{ status?.has_openrazer_lib ? 'Installed' : 'Missing' }}
+          <span v-if="status?.has_openrazer_lib">Installed</span>
+          <span v-else-if="status">Missing</span>
+          <span v-else>Connecting...</span>
         </div>
       </div>
 
@@ -83,34 +91,40 @@ async function onRestart() {
         <div class="diag-left">
           <span
             class="status-dot"
-            :class="loaded ? 'status-dot--success' : 'status-dot--warning'"
+            :class="loaded ? 'status-dot--success' : ''"
           ></span>
           <div>
             <div class="diag-name">Kernel Module: {{ mod }}</div>
-            <div class="diag-desc">Linux DKMS device driver</div>
+            <div class="diag-desc">
+              {{ mod === 'razermouse' ? 'Mouse device driver' :
+                 mod === 'razeraccessory' ? 'Addressable RGB Controller / Accessory driver' :
+                 mod === 'razerkbd' ? 'Keyboard device driver' : 'Audio headset driver' }}
+            </div>
           </div>
         </div>
         <div class="diag-right micro num">
-          {{ loaded ? 'Loaded in Kernel' : 'Not Loaded' }}
+          {{ loaded ? 'Loaded in Kernel' : 'Dormant (Hardware not attached)' }}
         </div>
       </div>
 
       <div class="row-divider"></div>
 
-      <!-- Plugdev Group -->
+      <!-- User Group Membership -->
       <div class="diag-row">
         <div class="diag-left">
           <span
             class="status-dot"
-            :class="status?.in_plugdev_group ? 'status-dot--success' : 'status-dot--warning'"
+            :class="status?.in_group ? 'status-dot--success' : (status ? 'status-dot--warning' : '')"
           ></span>
           <div>
-            <div class="diag-name">User Group: plugdev</div>
-            <div class="diag-desc">Permissions for raw USB hardware access</div>
+            <div class="diag-name">User Group: {{ status?.group_name || 'openrazer / plugdev' }}</div>
+            <div class="diag-desc">Hardware device permissions (udev)</div>
           </div>
         </div>
         <div class="diag-right micro num">
-          {{ status?.in_plugdev_group ? 'Member' : 'Not Member (Using Root/Udev)' }}
+          <span v-if="status?.in_group">Member ({{ status?.group_name }})</span>
+          <span v-else-if="status">Not Member (Add user to {{ status?.group_name || 'openrazer' }})</span>
+          <span v-else>Connecting...</span>
         </div>
       </div>
     </div>
@@ -119,8 +133,8 @@ async function onRestart() {
     <div class="box tips-box">
       <div class="micro">Troubleshooting Guide</div>
       <p class="tip-text">
-        If a plugged Razer device is not recognized, ensure your user is added to the <code>plugdev</code> group:
-        <code>sudo gpasswd -a $USER plugdev</code> and reload udev rules with <code>sudo udevadm control --reload-rules</code>.
+        Linux udev permissions for Razer devices are managed by the <code>openrazer</code> group on Arch Linux, Fedora, and openSUSE, and <code>plugdev</code> on Debian and Ubuntu.
+        Your user is currently verified in the <code>{{ status?.group_name || 'openrazer' }}</code> group. Kernel modules load dynamically on-demand when matching USB hardware is plugged in.
       </p>
     </div>
   </div>

@@ -21,14 +21,26 @@ const mockMode = ref(false);
 const notification = ref(null);
 
 let unsubscribeUpdates = null;
+let browserPollTimer = null;
 
-// Helper to safely invoke API
+// Helper to safely invoke API (native Electron IPC or browser dev API)
 async function apiCall(action, params = {}) {
   if (window.razerAPI && window.razerAPI.call) {
     return await window.razerAPI.call(action, params);
   } else {
-    console.warn(`[Mock Browser Mode] Action: ${action}`, params);
-    return null;
+    try {
+      const resp = await fetch('/api/bridge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, params })
+      });
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      return data.result;
+    } catch (e) {
+      console.warn(`[Browser API fallback error]`, e);
+      return null;
+    }
   }
 }
 
@@ -53,7 +65,8 @@ async function refreshStatus() {
     const res = await apiCall('get_status');
     if (res) {
       status.value = res;
-      mockMode.value = res.mock_mode;
+      daemonOnline.value = Boolean(res.daemon_running);
+      mockMode.value = Boolean(res.mock_mode);
     }
   } catch (err) {
     console.error('Failed to fetch status:', err);
@@ -73,11 +86,15 @@ onMounted(async () => {
         }
       }
     });
+  } else {
+    // When running in browser via Vite, poll every 3.5s
+    browserPollTimer = setInterval(refreshDevices, 3500);
   }
 });
 
 onBeforeUnmount(() => {
   if (unsubscribeUpdates) unsubscribeUpdates();
+  if (browserPollTimer) clearInterval(browserPollTimer);
 });
 
 const currentDevice = computed(() => {
@@ -201,6 +218,7 @@ async function handleRestartDaemon() {
   try {
     await apiCall('restart_daemon');
     showNotification('OpenRazer daemon restarted');
+    await refreshStatus();
     await refreshDevices();
   } catch (err) {
     alert(`Daemon restart failed: ${err.message}`);

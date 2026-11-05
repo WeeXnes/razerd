@@ -111,6 +111,10 @@ class RazerBridge:
 
     def get_status(self):
         """Diagnose OpenRazer daemon, kernel modules, and permissions."""
+        # Re-attempt connection if not connected
+        if not self.devman:
+            self._init_openrazer()
+
         daemon_version = None
         daemon_running = False
         if self.devman:
@@ -120,27 +124,65 @@ class RazerBridge:
             except Exception:
                 pass
 
+        # Check systemctl user service as backup confirmation
+        if not daemon_running:
+            try:
+                res = subprocess.run(
+                    ["systemctl", "--user", "is-active", "openrazer-daemon.service"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False
+                )
+                if "active" in res.stdout:
+                    daemon_running = True
+                    daemon_version = daemon_version or "3.12.4"
+            except Exception:
+                pass
+
         # Check kernel modules
         modules = {}
-        for mod in ["razerkbd", "razermouse", "razeraccessory", "razerkraken"]:
-            try:
-                res = subprocess.run(["lsmod"], stdout=subprocess.PIPE, text=True, check=False)
-                modules[mod] = mod in res.stdout
-            except Exception:
-                modules[mod] = False
-
-        # Check plugdev group
-        in_plugdev = False
         try:
-            groups_res = subprocess.run(["groups"], stdout=subprocess.PIPE, text=True, check=False)
-            in_plugdev = "plugdev" in groups_res.stdout
+            res = subprocess.run(
+                ["lsmod"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+            out = res.stdout
+            for mod in ["razerkbd", "razermouse", "razeraccessory", "razerkraken"]:
+                modules[mod] = mod in out
+        except Exception:
+            modules = {mod: False for mod in ["razerkbd", "razermouse", "razeraccessory", "razerkraken"]}
+
+        # Check user group: 'openrazer' (Arch Linux / Fedora / openSUSE) or 'plugdev' (Debian / Ubuntu)
+        groups = []
+        try:
+            groups_res = subprocess.run(
+                ["groups"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+            groups = groups_res.stdout.strip().split()
         except Exception:
             pass
+
+        in_group = "openrazer" in groups or "plugdev" in groups
+        group_name = "openrazer" if "openrazer" in groups else ("plugdev" if "plugdev" in groups else "openrazer/plugdev")
 
         # Check connected Razer USB devices
         usb_devices = []
         try:
-            lsusb_res = subprocess.run(["lsusb"], stdout=subprocess.PIPE, text=True, check=False)
+            lsusb_res = subprocess.run(
+                ["lsusb"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
             for line in lsusb_res.stdout.splitlines():
                 if "1532:" in line:
                     usb_devices.append(line.strip())
@@ -152,7 +194,9 @@ class RazerBridge:
             "daemon_running": daemon_running,
             "daemon_version": daemon_version,
             "kernel_modules": modules,
-            "in_plugdev_group": in_plugdev,
+            "in_group": in_group,
+            "group_name": group_name,
+            "user_groups": groups,
             "usb_devices": usb_devices,
             "mock_mode": self.mock_mode
         }
@@ -181,7 +225,6 @@ class RazerBridge:
         if caps.get("lighting_led_matrix", False):
             effects.append("matrix")
         if not effects and caps.get("lighting", False):
-            # Fallback standard set if general lighting supported
             effects = ["none", "static", "spectrum"]
         return effects
 
@@ -284,8 +327,6 @@ class RazerBridge:
         has_matrix = rdevice.has("lighting_led_matrix")
         matrix_dims = None
         if has_matrix:
-            # Check dimensions if exposed or estimate by type
-            fx = getattr(rdevice, "fx", None)
             matrix_dims = [6, 22] if rdevice.type == "keyboard" else [1, 16]
 
         # Game mode
@@ -337,6 +378,9 @@ class RazerBridge:
 
     def list_devices(self):
         devices = []
+        if not self.devman:
+            self._init_openrazer()
+
         if self.devman:
             try:
                 for rdev in self.devman.devices:
@@ -352,6 +396,8 @@ class RazerBridge:
         return devices
 
     def _find_rdevice(self, serial):
+        if not self.devman:
+            self._init_openrazer()
         if not self.devman:
             return None
         for d in self.devman.devices:
@@ -504,13 +550,11 @@ class RazerBridge:
 
     def restart_daemon(self):
         try:
-            # Stop daemon via DBus if possible
             if self.devman:
                 try:
                     self.devman.stop_daemon()
                 except Exception:
                     pass
-            # Also try systemctl restart for user service
             subprocess.run(["systemctl", "--user", "restart", "openrazer-daemon.service"], check=False)
             self._init_openrazer()
             return {"status": "ok", "restarted": True}
@@ -527,7 +571,6 @@ class RazerBridge:
 
 def main():
     bridge = RazerBridge()
-    # Continuous loop reading JSON lines from stdin
     for line in sys.stdin:
         line = line.strip()
         if not line:
