@@ -1,0 +1,35 @@
+{
+  "name": "razerd",
+  "version": "1.0.0",
+  "description": "Modern Linux native peripheral control suite for Razer hardware, built on OpenRazer.",
+  "main": "src/main/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "electron .",
+    "test": "node test/verify.mjs",
+    "dist": "npm run build && electron ."
+  },
+  "keywords": [
+    "openrazer",
+    "razer",
+    "rgb",
+    "chroma",
+    "dpi",
+    "electron",
+    "polychromatic"
+  ],
+  "author": "razerd",
+  "license": "GPL-3.0-or-later",
+  "type": "commonjs",
+  "dependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "vue": "^3.5.45"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "electron": "^45.2.3",
+    "vite": "^8.3.6"
+  }
+}
