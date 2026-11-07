@@ -504,13 +504,16 @@ class RazerBridge:
         self.config_dir = os.path.expanduser("~/.config/razerd")
         self.mappings_file = os.path.join(self.config_dir, "button_mappings.json")
         self.lighting_file = os.path.join(self.config_dir, "lighting_state.json")
+        self.settings_file = os.path.join(self.config_dir, "device_settings.json")
         self.button_mappings = self._load_button_mappings()
         self._load_lighting_state()
+        self._load_device_settings()
         self.active_remappers = {}
         self.argb_animators = {}
         self.argb_write_lock = threading.Lock()
         self._init_openrazer()
         self._sync_all_remappers()
+        self._restore_all_device_settings()
         self._restore_argb_controllers()
         atexit.register(self.stop_all_remappers)
 
@@ -577,6 +580,101 @@ class RazerBridge:
                 json.dump(out, f, indent=2)
         except Exception as e:
             sys.stderr.write(f"Error saving lighting state: {e}\n")
+
+    def _load_device_settings(self):
+        if os.path.exists(self.settings_file):
+            try:
+                with open(self.settings_file, "r") as f:
+                    saved = json.load(f)
+                if isinstance(saved, dict):
+                    for serial, dset in saved.items():
+                        if not isinstance(dset, dict):
+                            continue
+                        cache = self.device_state_cache.setdefault(serial, {})
+                        for k in ("dpi", "dpi_stages", "active_dpi_stage", "poll_rate", "brightness", "idle_time", "low_battery_threshold"):
+                            if k in dset and dset[k] is not None:
+                                cache[k] = dset[k]
+                        if "lighting" in dset and isinstance(dset["lighting"], dict):
+                            cache["user_set_lighting"] = True
+                            cache["lighting"] = dict(dset["lighting"])
+            except Exception:
+                pass
+
+    def _save_device_settings(self):
+        try:
+            os.makedirs(self.config_dir, exist_ok=True)
+            out = {}
+            for serial, cache in self.device_state_cache.items():
+                dset = {}
+                for k in ("dpi", "dpi_stages", "active_dpi_stage", "poll_rate", "brightness", "idle_time", "low_battery_threshold"):
+                    if k in cache and cache[k] is not None:
+                        dset[k] = cache[k]
+                if cache.get("user_set_lighting") and "lighting" in cache:
+                    dset["lighting"] = cache["lighting"]
+                if dset:
+                    out[serial] = dset
+            with open(self.settings_file, "w") as f:
+                json.dump(out, f, indent=2)
+        except Exception as e:
+            sys.stderr.write(f"Error saving device settings: {e}\n")
+
+    def _restore_all_device_settings(self):
+        if not self.devman:
+            return
+        try:
+            for rdev in self.devman.devices:
+                serial = rdev.serial
+                cache = self.device_state_cache.get(serial)
+                if not cache:
+                    continue
+                if "dpi_stages" in cache and rdev.has("dpi_stages"):
+                    try:
+                        active_st = int(cache.get("active_dpi_stage", 1))
+                        tuple_stages = [(int(s[0]), int(s[1])) for s in cache["dpi_stages"]]
+                        rdev.dpi_stages = (active_st, tuple_stages)
+                    except Exception:
+                        pass
+                if "dpi" in cache and rdev.has("dpi"):
+                    try:
+                        rdev.dpi = (int(cache["dpi"][0]), int(cache["dpi"][1]))
+                    except Exception:
+                        pass
+                if "poll_rate" in cache and rdev.has("poll_rate"):
+                    try:
+                        rdev.poll_rate = int(cache["poll_rate"])
+                    except Exception:
+                        pass
+                if "brightness" in cache and rdev.has("brightness"):
+                    try:
+                        rdev.brightness = float(cache["brightness"])
+                    except Exception:
+                        pass
+                if "idle_time" in cache and (rdev.has("idle_time") or rdev.has("set_idle_time")):
+                    try:
+                        rdev.set_idle_time(max(1, min(15, int(cache["idle_time"]))) * 60)
+                    except Exception:
+                        pass
+                if "low_battery_threshold" in cache and (rdev.has("low_battery_threshold") or rdev.has("set_low_battery_threshold")):
+                    try:
+                        rdev.set_low_battery_threshold(max(5, min(100, int(cache["low_battery_threshold"]))))
+                    except Exception:
+                        pass
+                if cache.get("user_set_lighting") and "lighting" in cache and not self._is_argb_controller(rdev):
+                    lstate = cache["lighting"]
+                    try:
+                        self.set_effect(
+                            serial,
+                            lstate.get("current_effect", "static"),
+                            lstate.get("colors", ["#fafafa", "#4ade80"]),
+                            lstate.get("speed", "normal"),
+                            lstate.get("direction", "right"),
+                            lstate.get("zone", "overall"),
+                            lstate.get("breath_mode", "single")
+                        )
+                    except Exception:
+                        pass
+        except Exception as e:
+            sys.stderr.write(f"Warning restoring device settings: {e}\n")
 
     def stop_all_remappers(self):
         for serial, remapper in list(self.active_remappers.items()):
@@ -901,7 +999,8 @@ class RazerBridge:
             "group_name": group_name,
             "user_groups": groups,
             "usb_devices": usb_devices,
-            "mock_mode": self.mock_mode
+            "mock_mode": self.mock_mode,
+            "autostart_enabled": self.get_autostart().get("enabled", False)
         }
 
     def _get_supported_effects(self, rdevice):
@@ -1357,6 +1456,7 @@ class RazerBridge:
                     break
             if matched_stage is not None:
                 cache["active_dpi_stage"] = matched_stage
+        self._save_device_settings()
         return {"status": "ok", "dpi": [x, y]}
 
     def set_dpi_stages(self, serial, active_stage, stages):
@@ -1375,6 +1475,7 @@ class RazerBridge:
         cache["last_dpi_write"] = time.time()
         if 1 <= active_stage <= len(clean_stages):
             cache["dpi"] = clean_stages[active_stage - 1]
+        self._save_device_settings()
         return {"status": "ok", "active_stage": active_stage, "stages": clean_stages}
 
     def cycle_dpi_stage(self, serial, direction=1):
@@ -1397,6 +1498,7 @@ class RazerBridge:
             except Exception as e:
                 sys.stderr.write(f"Error setting poll rate: {e}\n")
         self.device_state_cache.setdefault(serial, {})["poll_rate"] = rate
+        self._save_device_settings()
         return {"status": "ok", "poll_rate": rate}
 
     def cycle_poll_rate(self, serial):
@@ -1450,6 +1552,7 @@ class RazerBridge:
             except Exception as e:
                 sys.stderr.write(f"Error setting brightness: {e}\n")
         self.device_state_cache.setdefault(serial, {})["brightness"] = round(brightness)
+        self._save_device_settings()
         return {"status": "ok", "brightness": round(brightness)}
 
     def set_channel(self, serial, channel, brightness=None, size=None):
@@ -1594,6 +1697,7 @@ class RazerBridge:
             "zone": zone
         })
         self._save_lighting_state()
+        self._save_device_settings()
         return {"status": "ok", "effect": effect, "colors": colors, "breath_mode": breath_mode}
 
     def set_matrix(self, serial, grid):
@@ -1705,7 +1809,93 @@ class RazerBridge:
                     cache["low_battery_threshold"] = thresh
                 except Exception as e:
                     sys.stderr.write(f"Error setting low battery threshold: {e}\n")
+        self._save_device_settings()
         return {"status": "ok", "idle_time": idle_time, "low_battery_threshold": low_battery_threshold}
+
+    def get_autostart(self):
+        autostart_desktop = os.path.expanduser("~/.config/autostart/razerd.desktop")
+        systemd_service = os.path.expanduser("~/.config/systemd/user/razerd.service")
+        enabled = os.path.exists(autostart_desktop) or os.path.exists(systemd_service)
+        return {"status": "ok", "enabled": enabled}
+
+    def set_autostart(self, enabled=True, start_minimized=True):
+        enabled = bool(enabled)
+        autostart_dir = os.path.expanduser("~/.config/autostart")
+        systemd_dir = os.path.expanduser("~/.config/systemd/user")
+        autostart_desktop = os.path.join(autostart_dir, "razerd.desktop")
+        systemd_service = os.path.join(systemd_dir, "razerd.service")
+        launcher_bin = os.path.expanduser("~/.local/bin/razerd")
+        icon_path = os.path.expanduser("~/.local/share/icons/hicolor/scalable/apps/razerd.svg")
+        flag = " --minimized" if start_minimized else ""
+
+        # Always ensure Polychromatic autostart stays disabled so it doesn't conflict
+        try:
+            os.makedirs(autostart_dir, exist_ok=True)
+            poly_desktop = os.path.join(autostart_dir, "polychromatic-autostart.desktop")
+            with open(poly_desktop, "w") as f:
+                f.write("[Desktop Entry]\nType=Application\nName=Polychromatic Autostart\nExec=polychromatic-helper --autostart\nHidden=true\nX-GNOME-Autostart-enabled=false\n")
+            subprocess.run(["systemctl", "--user", "disable", "--now", "polychromatic.service"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except Exception:
+            pass
+
+        if enabled:
+            try:
+                os.makedirs(autostart_dir, exist_ok=True)
+                desktop_content = (
+                    "[Desktop Entry]\n"
+                    "Version=1.0\n"
+                    "Type=Application\n"
+                    "Name=RazerD Autostart\n"
+                    "Comment=Start RazerD minimized in system tray and restore hardware settings\n"
+                    f"Exec={launcher_bin}{flag}\n"
+                    f"Icon={icon_path}\n"
+                    "Terminal=false\n"
+                    "Categories=Settings;HardwareSettings;Utility;\n"
+                    "StartupWMClass=razerd\n"
+                    "X-GNOME-Autostart-enabled=true\n"
+                )
+                with open(autostart_desktop, "w") as f:
+                    f.write(desktop_content)
+
+                os.makedirs(systemd_dir, exist_ok=True)
+                service_content = (
+                    "[Unit]\n"
+                    "Description=RazerD Background Hardware Controller & Tray Applet\n"
+                    "PartOf=graphical-session.target\n"
+                    "After=graphical-session.target openrazer-daemon.service\n"
+                    "Wants=openrazer-daemon.service\n\n"
+                    "[Service]\n"
+                    "Type=simple\n"
+                    f"ExecStart={launcher_bin}{flag}\n"
+                    "Restart=on-failure\n"
+                    "RestartSec=3\n\n"
+                    "[Install]\n"
+                    "WantedBy=graphical-session.target\n"
+                )
+                with open(systemd_service, "w") as f:
+                    f.write(service_content)
+                subprocess.run(["systemctl", "--user", "daemon-reload"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                subprocess.run(["systemctl", "--user", "enable", "razerd.service"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            except Exception as e:
+                sys.stderr.write(f"Error enabling autostart: {e}\n")
+                return {"status": "error", "message": str(e)}
+        else:
+            try:
+                if os.path.exists(autostart_desktop):
+                    os.remove(autostart_desktop)
+                subprocess.run(["systemctl", "--user", "disable", "razerd.service"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                if os.path.exists(systemd_service):
+                    os.remove(systemd_service)
+                subprocess.run(["systemctl", "--user", "daemon-reload"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            except Exception as e:
+                sys.stderr.write(f"Error disabling autostart: {e}\n")
+
+        return {"status": "ok", "enabled": enabled}
 
     def set_game_mode(self, serial, enable):
         enable = bool(enable)
@@ -1824,6 +2014,10 @@ def main():
                 result = bridge.restart_daemon()
             elif action == "toggle_mock":
                 result = bridge.toggle_mock(params.get("enable"))
+            elif action == "get_autostart":
+                result = bridge.get_autostart()
+            elif action == "set_autostart":
+                result = bridge.set_autostart(params.get("enabled", True), params.get("start_minimized", True))
             else:
                 error = f"Unknown action: {action}"
 

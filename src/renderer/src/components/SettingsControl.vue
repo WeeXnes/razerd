@@ -5,10 +5,14 @@ const props = defineProps({
   mockMode: {
     type: Boolean,
     default: false
+  },
+  autostartEnabled: {
+    type: Boolean,
+    default: true
   }
 });
 
-const emit = defineEmits(['toggle-mock', 'toggle-screensaver']);
+const emit = defineEmits(['toggle-mock', 'toggle-screensaver', 'toggle-autostart']);
 
 const screensaverOff = ref(true);
 
@@ -36,6 +40,24 @@ function onScreensaverToggle() {
     </div>
 
     <div class="box settings-box">
+      <!-- Autostart Minimized in System Tray -->
+      <div class="setting-row">
+        <div class="setting-info">
+          <span class="setting-title">Autostart Minimized in System Tray</span>
+          <span class="setting-hint">Launch RazerD silently in the system tray at desktop login, disable Polychromatic autostart, and automatically restore your saved hardware profile & lighting.</span>
+        </div>
+        <label class="switch">
+          <input
+            type="checkbox"
+            :checked="autostartEnabled"
+            @change="emit('toggle-autostart', $event.target.checked)"
+          />
+          <span class="switch__slider"></span>
+        </label>
+      </div>
+
+      <div class="row-divider"></div>
+
       <!-- Hardware Simulator -->
       <div class="setting-row">
         <div class="setting-info">

@@ -9,14 +9,40 @@ if (process.platform === 'linux' && typeof app.setDesktopName === 'function') {
   app.setDesktopName('razerd.desktop');
 }
 
+const startMinimized = process.argv.some((arg) =>
+  ['--minimized', '--autostart', '--hidden'].includes(arg)
+);
+
 let mainWindow = null;
 let tray = null;
+let isQuitting = false;
 let pyProcess = null;
 let pyReader = null;
 let reqCounter = 0;
 let lastMutationAt = 0;
 let inFlightMutations = 0;
 const pendingRequests = new Map();
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    showMainWindow();
+  });
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow(false);
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
 
 function startPythonBridge() {
   const scriptPath = path.join(__dirname, '..', 'bridge', 'bridge.py');
@@ -104,8 +130,88 @@ function callBridge(action, params = {}) {
   });
 }
 
-function createWindow() {
-  const iconPath = path.join(__dirname, '..', '..', 'assets', 'razerd.svg');
+function createTray() {
+  if (tray) return;
+  const trayIconPath = path.join(__dirname, '..', '..', 'assets', 'razerd-tray.png');
+  const fallbackIconPath = path.join(__dirname, '..', '..', 'assets', 'razerd.png');
+  const targetIcon = fs.existsSync(trayIconPath) ? trayIconPath : fallbackIconPath;
+
+  let img = nativeImage.createFromPath(targetIcon);
+  if (!img.isEmpty()) {
+    img = img.resize({ width: 22, height: 22 });
+  }
+
+  tray = new Tray(img);
+  tray.setToolTip('RazerD — Razer Hardware & Chroma Control');
+
+  tray.on('click', () => {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      mainWindow.hide();
+    } else {
+      showMainWindow();
+    }
+  });
+
+  updateTrayMenu();
+}
+
+async function updateTrayMenu() {
+  if (!tray) return;
+  let autostartEnabled = true;
+  try {
+    const res = await callBridge('get_autostart');
+    if (res && typeof res.enabled === 'boolean') {
+      autostartEnabled = res.enabled;
+    }
+  } catch {}
+
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'RazerD Telemetry Suite', enabled: false },
+    { type: 'separator' },
+    {
+      label: 'Open RazerD',
+      click: () => showMainWindow()
+    },
+    {
+      label: 'Hide to System Tray',
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.hide();
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Start Minimized on Login',
+      type: 'checkbox',
+      checked: autostartEnabled,
+      click: async (menuItem) => {
+        try {
+          await callBridge('set_autostart', {
+            enabled: menuItem.checked,
+            start_minimized: true
+          });
+          updateTrayMenu();
+        } catch {}
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit RazerD',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setContextMenu(contextMenu);
+}
+
+function createWindow(hidden = false) {
+  const pngIconPath = path.join(__dirname, '..', '..', 'assets', 'razerd.png');
+  const svgIconPath = path.join(__dirname, '..', '..', 'assets', 'razerd.svg');
+  const iconPath = fs.existsSync(pngIconPath) ? pngIconPath : svgIconPath;
   Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -138,7 +244,16 @@ function createWindow() {
   }
 
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+    if (!hidden) {
+      mainWindow.show();
+    }
+  });
+
+  mainWindow.on('close', (event) => {
+    if (!isQuitting && tray) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
   });
 
   mainWindow.on('closed', () => {
@@ -148,7 +263,11 @@ function createWindow() {
 
 // IPC Handlers
 ipcMain.handle('razer:call', async (_event, action, params) => {
-  return callBridge(action, params);
+  const res = await callBridge(action, params);
+  if (action === 'set_autostart') {
+    updateTrayMenu();
+  }
+  return res;
 });
 
 ipcMain.on('window:minimize', () => {
@@ -190,15 +309,19 @@ function startDevicePolling() {
 
 app.whenReady().then(() => {
   startPythonBridge();
-  createWindow();
+  createTray();
+  createWindow(startMinimized);
   startDevicePolling();
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    showMainWindow();
   });
 });
 
 app.on('window-all-closed', () => {
+  if (!isQuitting && tray) {
+    return;
+  }
   if (pollTimer) clearInterval(pollTimer);
   if (pyProcess) {
     pyProcess.kill();
@@ -209,6 +332,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
+  if (pollTimer) clearInterval(pollTimer);
   if (pyProcess) {
     pyProcess.kill();
   }

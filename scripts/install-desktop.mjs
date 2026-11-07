@@ -8,13 +8,19 @@ const projectDir = path.resolve(import.meta.dirname, '..');
 const homeDir = os.homedir();
 
 const xdgDataHome = process.env.XDG_DATA_HOME || path.join(homeDir, '.local', 'share');
+const xdgConfigHome = process.env.XDG_CONFIG_HOME || path.join(homeDir, '.config');
 const localBinDir = path.join(homeDir, '.local', 'bin');
 const applicationsDir = path.join(xdgDataHome, 'applications');
+const autostartDir = path.join(xdgConfigHome, 'autostart');
+const systemdUserDir = path.join(xdgConfigHome, 'systemd', 'user');
 const hicolorScalableDir = path.join(xdgDataHome, 'icons', 'hicolor', 'scalable', 'apps');
 const flatIconsDir = path.join(xdgDataHome, 'icons');
 
 const launcherPath = path.join(localBinDir, 'razerd');
 const desktopEntryPath = path.join(applicationsDir, 'razerd.desktop');
+const autostartEntryPath = path.join(autostartDir, 'razerd.desktop');
+const polyAutostartPath = path.join(autostartDir, 'polychromatic-autostart.desktop');
+const systemdServicePath = path.join(systemdUserDir, 'razerd.service');
 const iconDestPath = path.join(hicolorScalableDir, 'razerd.svg');
 const flatIconDestPath = path.join(flatIconsDir, 'razerd.svg');
 const iconSrcPath = path.join(projectDir, 'assets', 'razerd.svg');
@@ -38,13 +44,18 @@ function refreshDesktopDatabase() {
 }
 
 if (isUninstall) {
-  console.log('Uninstalling razerd desktop entry & launcher...');
+  console.log('Uninstalling razerd desktop entry, autostart & launcher...');
   safeUnlink(launcherPath);
   safeUnlink(desktopEntryPath);
+  safeUnlink(autostartEntryPath);
+  try {
+    execSync('systemctl --user disable razerd.service', { stdio: 'ignore' });
+  } catch {}
+  safeUnlink(systemdServicePath);
   safeUnlink(iconDestPath);
   safeUnlink(flatIconDestPath);
   refreshDesktopDatabase();
-  console.log('✓ Uninstalled razerd desktop shortcut.');
+  console.log('✓ Uninstalled razerd desktop shortcut and autostart.');
   process.exit(0);
 }
 
@@ -100,9 +111,56 @@ fs.writeFileSync(desktopEntryPath, desktopEntryContent, { mode: 0o755 });
 fs.chmodSync(desktopEntryPath, 0o755);
 console.log(`✓ Installed desktop shortcut:  ${desktopEntryPath}`);
 
-// 6. Refresh desktop database for application launchers (Rofi, Wofi, Fuzzel, KDE, GNOME)
+// 6. Disable Polychromatic autostart and enable RazerD minimized tray autostart
+fs.mkdirSync(autostartDir, { recursive: true });
+fs.writeFileSync(
+  polyAutostartPath,
+  `[Desktop Entry]\nType=Application\nName=Polychromatic Autostart\nExec=polychromatic-helper --autostart\nHidden=true\nX-GNOME-Autostart-enabled=false\n`
+);
+try {
+  execSync('systemctl --user disable --now polychromatic.service', { stdio: 'ignore' });
+} catch {}
+
+const autostartContent = `[Desktop Entry]
+Version=1.0
+Type=Application
+Name=RazerD Autostart
+Comment=Start RazerD minimized in system tray and restore hardware settings
+Exec=${launcherPath} --minimized
+Icon=${iconDestPath}
+Terminal=false
+Categories=Settings;HardwareSettings;Utility;
+StartupWMClass=razerd
+X-GNOME-Autostart-enabled=true
+`;
+fs.writeFileSync(autostartEntryPath, autostartContent, { mode: 0o755 });
+console.log(`✓ Installed XDG autostart:     ${autostartEntryPath}`);
+
+fs.mkdirSync(systemdUserDir, { recursive: true });
+const systemdContent = `[Unit]
+Description=RazerD Background Hardware Controller & Tray Applet
+PartOf=graphical-session.target
+After=graphical-session.target openrazer-daemon.service
+Wants=openrazer-daemon.service
+
+[Service]
+Type=simple
+ExecStart=${launcherPath} --minimized
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+`;
+fs.writeFileSync(systemdServicePath, systemdContent);
+try {
+  execSync('systemctl --user daemon-reload && systemctl --user enable razerd.service', { stdio: 'ignore' });
+  console.log(`✓ Enabled systemd autostart:   ${systemdServicePath}`);
+} catch {}
+
+// 7. Refresh desktop database for application launchers (Rofi, Wofi, Fuzzel, KDE, GNOME)
 refreshDesktopDatabase();
 
-console.log('\n✓ RazerD is now installed in your Linux application menu (Rofi / Wofi / Desktop)!');
+console.log('\n✓ RazerD is now installed in your Linux application menu & configured to autostart minimized in the system tray!');
 console.log('  • Search for "RazerD" or "razer" in Rofi (rofi -show drun)');
 console.log(`  • Or launch directly from terminal via: ${launcherPath}`);

@@ -19,6 +19,7 @@ const selectedSerial = ref('');
 const status = ref(null);
 const daemonOnline = ref(true);
 const mockMode = ref(false);
+const autostartEnabled = ref(true);
 const notification = ref(null);
 
 const LEGACY_PRESET_IDS = new Set(['prof-comp', 'prof-stealth', 'prof-office', 'prof-chroma']);
@@ -201,6 +202,9 @@ async function refreshStatus() {
       status.value = res;
       daemonOnline.value = Boolean(res.daemon_running);
       mockMode.value = Boolean(res.mock_mode);
+      if (typeof res.autostart_enabled === 'boolean') {
+        autostartEnabled.value = res.autostart_enabled;
+      }
     }
   } catch (err) {
     console.error('Failed to fetch status:', err);
@@ -634,6 +638,26 @@ async function handleToggleMock() {
   }
 }
 
+async function handleToggleAutostart(enabled) {
+  autostartEnabled.value = Boolean(enabled);
+  try {
+    const res = await apiCall('set_autostart', {
+      enabled: autostartEnabled.value,
+      start_minimized: true
+    });
+    if (res && typeof res.enabled === 'boolean') {
+      autostartEnabled.value = res.enabled;
+    }
+    showNotification(
+      autostartEnabled.value
+        ? 'Autostart enabled (starts minimized in tray)'
+        : 'Autostart disabled'
+    );
+  } catch (err) {
+    console.error('Failed to update autostart:', err);
+  }
+}
+
 async function handleRestartDaemon() {
   try {
     await apiCall('restart_daemon');
@@ -791,7 +815,9 @@ async function handleRestartDaemon() {
           <SettingsControl
             v-else-if="currentSection === 'settings'"
             :mock-mode="mockMode"
+            :autostart-enabled="autostartEnabled"
             @toggle-mock="handleToggleMock"
+            @toggle-autostart="handleToggleAutostart"
           />
         </div>
       </div>
