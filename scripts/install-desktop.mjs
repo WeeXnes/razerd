@@ -121,30 +121,19 @@ try {
   execSync('systemctl --user disable --now polychromatic.service', { stdio: 'ignore' });
 } catch {}
 
-const autostartContent = `[Desktop Entry]
-Version=1.0
-Type=Application
-Name=RazerD Autostart
-Comment=Start RazerD minimized in system tray and restore hardware settings
-Exec=${launcherPath} --minimized
-Icon=${iconDestPath}
-Terminal=false
-Categories=Settings;HardwareSettings;Utility;
-StartupWMClass=razerd
-X-GNOME-Autostart-enabled=true
-`;
-fs.writeFileSync(autostartEntryPath, autostartContent, { mode: 0o755 });
-console.log(`✓ Installed XDG autostart:     ${autostartEntryPath}`);
+// Remove duplicate XDG autostart entry so systemd user service is the single clean launcher
+safeUnlink(autostartEntryPath);
 
 fs.mkdirSync(systemdUserDir, { recursive: true });
 const systemdContent = `[Unit]
 Description=RazerD Background Hardware Controller & Tray Applet
 PartOf=graphical-session.target
-After=graphical-session.target openrazer-daemon.service
+After=graphical-session.target openrazer-daemon.service waybar.service
 Wants=openrazer-daemon.service
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do busctl --user list 2>/dev/null | grep -q "StatusNotifierWatcher" && busctl --user list 2>/dev/null | grep -q "org.razer" && break; sleep 0.5; done'
 ExecStart=${launcherPath} --minimized
 Restart=on-failure
 RestartSec=3

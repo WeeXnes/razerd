@@ -143,15 +143,16 @@ async function apiCall(action, params = {}) {
     inFlightMutations++;
     lastMutationAt = Date.now();
   }
+  const plainParams = params ? JSON.parse(JSON.stringify(params)) : {};
   try {
     if (window.razerAPI && window.razerAPI.call) {
-      return await window.razerAPI.call(action, params);
+      return await window.razerAPI.call(action, plainParams);
     } else {
       try {
         const resp = await fetch('/api/bridge', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action, params })
+          body: JSON.stringify({ action, params: plainParams })
         });
         const data = await resp.json();
         if (data.error) throw new Error(data.error);

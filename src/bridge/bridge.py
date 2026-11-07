@@ -402,11 +402,12 @@ class ArgbEffectAnimator:
     Software frame animator for the Razer Chroma Addressable RGB Controller (1532:0F1F).
     In OpenRazer's kernel driver (razeraccessory_driver.c), 1532:0F1F is placed into
     Driver Mode (0x03, 0x00) where built-in hardware effect reports (which send ZERO_LED=0x00)
-    are ignored by the controller firmware, and matrix_custom_frame has an early 'return count;'
-    after the first row. This animator streams per-channel ARGB frames (one write per row 0..5)
-    so Static, Spectrum, Wave, Breathing, Off, and Matrix Editor work across all 6 headers.
+    are ignored by the controller firmware, and the hardware frame buffer blanks if not
+    periodically refreshed. This animator continuously streams per-channel ARGB frames
+    (one write per row 0..5) so Static, Spectrum, Wave, Breathing, and Matrix Editor
+    stay continuously lit across all 6 headers.
     """
-    def __init__(self, bridge, serial, effect, rgb_colors, speed="normal", direction="right", breath_mode="single"):
+    def __init__(self, bridge, serial, effect, rgb_colors, speed="normal", direction="right", breath_mode="single", custom_rows=None):
         self.bridge = bridge
         self.serial = serial
         self.effect = effect
@@ -414,12 +415,13 @@ class ArgbEffectAnimator:
         self.speed = speed
         self.direction = direction
         self.breath_mode = breath_mode
+        self.custom_rows = custom_rows
         self.running = False
         self.thread = None
 
     def start(self):
         self.running = True
-        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread = threading.Thread(target=self._run, daemon=True, name=f"argb-{self.serial}")
         self.thread.start()
 
     def stop(self):
@@ -427,61 +429,87 @@ class ArgbEffectAnimator:
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=0.35)
 
+    def _scale_row(self, row_bytes, scale):
+        if scale >= 0.995:
+            return row_bytes
+        if scale <= 0.005:
+            return bytes(len(row_bytes))
+        return bytes(int(b * scale) for b in row_bytes)
+
+    def _build_frame_rows(self, t, speed_mult, dir_sign):
+        cols = 80
+        rows = 6
+        cache = self.bridge.device_state_cache.get(self.serial, {})
+        br_scale = max(0.0, min(1.0, float(cache.get("brightness", 100)) / 100.0))
+
+        if self.effect == "matrix" and self.custom_rows:
+            return [self._scale_row(r, br_scale) for r in self.custom_rows]
+
+        if self.effect in ("static", "reactive", "ripple", "starlight", "matrix"):
+            base_r, base_g, base_b = self.rgb_colors[0]
+            rgb = (
+                int(base_r * br_scale),
+                int(base_g * br_scale),
+                int(base_b * br_scale)
+            )
+            row_bytes = bytes(rgb) * cols
+            return [row_bytes for _ in range(rows)]
+
+        if self.effect == "spectrum":
+            hue = (t * 0.12) % 1.0
+            r_f, g_f, b_f = colorsys.hsv_to_rgb(hue, 1.0, br_scale)
+            rgb = (int(r_f * 255), int(g_f * 255), int(b_f * 255))
+            row_bytes = bytes(rgb) * cols
+            return [row_bytes for _ in range(rows)]
+
+        if self.effect == "wave":
+            row_buf = bytearray(cols * 3)
+            for c in range(cols):
+                hue = ((c / 20.0) + dir_sign * t * 0.35) % 1.0
+                r_f, g_f, b_f = colorsys.hsv_to_rgb(hue, 1.0, br_scale)
+                idx = c * 3
+                row_buf[idx] = int(r_f * 255)
+                row_buf[idx + 1] = int(g_f * 255)
+                row_buf[idx + 2] = int(b_f * 255)
+            row_bytes = bytes(row_buf)
+            return [row_bytes for _ in range(rows)]
+
+        if self.effect == "breath":
+            cycle = (t * 0.45)
+            phase = cycle % 1.0
+            intensity = 0.5 * (1.0 - math.cos(phase * 2.0 * math.pi)) * br_scale
+            cycle_idx = int(cycle)
+
+            if self.breath_mode == "random":
+                hue = ((cycle_idx * 0.27) % 1.0)
+                r_f, g_f, b_f = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+                base_rgb = (int(r_f * 255), int(g_f * 255), int(b_f * 255))
+            elif self.breath_mode == "dual" and len(self.rgb_colors) >= 2:
+                base_rgb = self.rgb_colors[cycle_idx % 2]
+            else:
+                base_rgb = self.rgb_colors[0]
+
+            rgb = (
+                int(base_rgb[0] * intensity),
+                int(base_rgb[1] * intensity),
+                int(base_rgb[2] * intensity)
+            )
+            row_bytes = bytes(rgb) * cols
+            return [row_bytes for _ in range(rows)]
+
+        return None
+
     def _run(self):
         speed_mult = {"fast": 2.2, "normal": 1.2, "slow": 0.6, "ultra": 3.0}.get(self.speed, 1.2)
         dir_sign = -1.0 if self.direction in ("right", "up", "clockwise") else 1.0
         t0 = time.time()
-        cols = 80
-        rows = 6
+        is_static_like = self.effect in ("static", "reactive", "ripple", "starlight", "matrix")
+        sleep_ticks = 12 if is_static_like else 3  # ~180ms for static/matrix keepalive, ~45ms for animations
 
         while self.running:
             t = (time.time() - t0) * speed_mult
-            frame_rows = []
-
-            if self.effect == "spectrum":
-                hue = (t * 0.12) % 1.0
-                r_f, g_f, b_f = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
-                rgb = (int(r_f * 255), int(g_f * 255), int(b_f * 255))
-                row_bytes = bytes(rgb) * cols
-                frame_rows = [row_bytes for _ in range(rows)]
-
-            elif self.effect == "wave":
-                # Smooth spatial rainbow wave across LEDs 0..79 (period = 20 LEDs so even 14-LED strips show full wave)
-                row_buf = bytearray(cols * 3)
-                for c in range(cols):
-                    hue = ((c / 20.0) + dir_sign * t * 0.35) % 1.0
-                    r_f, g_f, b_f = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
-                    idx = c * 3
-                    row_buf[idx] = int(r_f * 255)
-                    row_buf[idx + 1] = int(g_f * 255)
-                    row_buf[idx + 2] = int(b_f * 255)
-                row_bytes = bytes(row_buf)
-                frame_rows = [row_bytes for _ in range(rows)]
-
-            elif self.effect == "breath":
-                # Smooth breathing envelope: 0 -> 1 -> 0 every cycle
-                cycle = (t * 0.45)
-                phase = cycle % 1.0
-                intensity = 0.5 * (1.0 - math.cos(phase * 2.0 * math.pi))
-                cycle_idx = int(cycle)
-
-                if self.breath_mode == "random":
-                    hue = ((cycle_idx * 0.27) % 1.0)
-                    r_f, g_f, b_f = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
-                    base_rgb = (int(r_f * 255), int(g_f * 255), int(b_f * 255))
-                elif self.breath_mode == "dual" and len(self.rgb_colors) >= 2:
-                    base_rgb = self.rgb_colors[cycle_idx % 2]
-                else:
-                    base_rgb = self.rgb_colors[0]
-
-                rgb = (
-                    int(base_rgb[0] * intensity),
-                    int(base_rgb[1] * intensity),
-                    int(base_rgb[2] * intensity)
-                )
-                row_bytes = bytes(rgb) * cols
-                frame_rows = [row_bytes for _ in range(rows)]
-            else:
+            frame_rows = self._build_frame_rows(t, speed_mult, dir_sign)
+            if not frame_rows:
                 break
 
             try:
@@ -489,8 +517,7 @@ class ArgbEffectAnimator:
             except Exception:
                 pass
 
-            # Sleep ~45ms (~22 FPS) while checking running flag
-            for _ in range(3):
+            for _ in range(sleep_ticks):
                 if not self.running:
                     break
                 time.sleep(0.015)
@@ -500,6 +527,7 @@ class RazerBridge:
     def __init__(self):
         self.devman = None
         self.mock_mode = False
+        self._settings_restored = False
         self.device_state_cache = {}
         self.config_dir = os.path.expanduser("~/.config/razerd")
         self.mappings_file = os.path.join(self.config_dir, "button_mappings.json")
@@ -511,10 +539,7 @@ class RazerBridge:
         self.active_remappers = {}
         self.argb_animators = {}
         self.argb_write_lock = threading.Lock()
-        self._init_openrazer()
-        self._sync_all_remappers()
-        self._restore_all_device_settings()
-        self._restore_argb_controllers()
+        self._ensure_openrazer_ready()
         atexit.register(self.stop_all_remappers)
 
     def _init_openrazer(self):
@@ -528,6 +553,26 @@ class RazerBridge:
             sys.stderr.write(f"Warning: Could not connect to OpenRazer daemon: {e}\n")
             self.devman = None
             return False
+
+    def _ensure_openrazer_ready(self):
+        if not self.devman:
+            self._init_openrazer()
+        elif not self._settings_restored:
+            try:
+                if len(self.devman.devices) == 0:
+                    self._init_openrazer()
+            except Exception:
+                self._init_openrazer()
+
+        if self.devman and not self._settings_restored:
+            try:
+                if len(self.devman.devices) > 0:
+                    self._settings_restored = True
+                    self._sync_all_remappers()
+                    self._restore_all_device_settings()
+                    self._restore_argb_controllers()
+            except Exception as e:
+                sys.stderr.write(f"Warning during initial OpenRazer device restore: {e}\n")
 
     def _load_openrazer_persistence(self):
         cfg = configparser.ConfigParser()
@@ -808,7 +853,7 @@ class RazerBridge:
         self._get_argb_channel_sizes(serial, sysfs_dir, force=True)
         cache["argb_hw_init"] = True
 
-    def _drive_argb_effect(self, rdev, effect, rgb_colors, speed="normal", direction="right", breath_mode="single"):
+    def _drive_argb_effect(self, rdev, effect, rgb_colors, speed="normal", direction="right", breath_mode="single", custom_rows=None):
         serial = rdev.serial
         self._stop_argb_animator(serial)
 
@@ -820,13 +865,9 @@ class RazerBridge:
         if effect == "none":
             off_row = bytes([0, 0, 0]) * cols
             self._write_argb_raw_rows(serial, [off_row for _ in range(rows)])
-        elif effect in ("static", "reactive", "ripple", "starlight", "matrix"):
-            r, g, b = rgb_colors[0]
-            static_row = bytes([r, g, b]) * cols
-            self._write_argb_raw_rows(serial, [static_row for _ in range(rows)])
-        elif effect in ("spectrum", "wave", "breath", "wheel"):
+        else:
             eff_type = "wave" if effect == "wheel" else effect
-            anim = ArgbEffectAnimator(self, serial, eff_type, rgb_colors, speed, direction, breath_mode)
+            anim = ArgbEffectAnimator(self, serial, eff_type, rgb_colors, speed, direction, breath_mode, custom_rows=custom_rows)
             self.argb_animators[serial] = anim
             anim.start()
 
@@ -914,8 +955,7 @@ class RazerBridge:
 
     def get_status(self):
         """Diagnose OpenRazer daemon, kernel modules, permissions, and USB/HID bus."""
-        if not self.devman:
-            self._init_openrazer()
+        self._ensure_openrazer_ready()
 
         daemon_version = None
         daemon_running = False
@@ -1094,9 +1134,9 @@ class RazerBridge:
         speed = cache.get("speed", "normal")
         direction = cache.get("direction", "right")
 
-        # If the user explicitly set lighting in this session (or ARGB software animator is running),
-        # preserve the cached effect state so custom frame streaming doesn't overwrite it as 'matrix'.
-        if dev_cache.get("user_set_lighting"):
+        # Once lighting state is cached (or explicitly set by the user), return cached state
+        # so periodic list_devices() calls do not re-query D-Bus or overwrite custom ARGB frames.
+        if dev_cache.get("user_set_lighting") or "lighting" in dev_cache:
             while len(colors) < 2:
                 colors.append("#4ade80")
             return {
@@ -1170,51 +1210,67 @@ class RazerBridge:
         cache = self.device_state_cache.setdefault(serial, {})
         persistence_cfg = self._load_openrazer_persistence()
         p_sec = persistence_cfg[serial] if serial in persistence_cfg else {}
+        now = time.time()
 
-        # Battery
+        # Battery (throttled to once every 30s per device so sleeping wireless mice don't stall USB)
         has_battery = rdevice.has("battery")
         battery = None
         is_charging = None
         if has_battery:
-            try:
-                hw_bat = int(rdevice.battery_level)
-                hw_chg = bool(rdevice.is_charging)
-                if hw_bat > 0 or hw_chg:
-                    battery = hw_bat
-                    is_charging = hw_chg
-                    cache["battery"] = battery
-                    cache["is_charging"] = is_charging
-                else:
+            if "battery" in cache and (now - cache.get("last_battery_poll", 0)) < 30.0:
+                battery = cache["battery"]
+                is_charging = cache.get("is_charging", False)
+            else:
+                cache["last_battery_poll"] = now
+                try:
+                    hw_bat = int(rdevice.battery_level)
+                    hw_chg = bool(rdevice.is_charging)
+                    if hw_bat > 0 or hw_chg:
+                        battery = hw_bat
+                        is_charging = hw_chg
+                        cache["battery"] = battery
+                        cache["is_charging"] = is_charging
+                    else:
+                        battery = cache.get("battery", 0)
+                        is_charging = cache.get("is_charging", False)
+                        cache["battery"] = battery
+                        cache["is_charging"] = is_charging
+                except Exception:
                     battery = cache.get("battery", 0)
                     is_charging = cache.get("is_charging", False)
-            except Exception:
-                battery = cache.get("battery", 0)
-                is_charging = cache.get("is_charging", False)
+                    cache["battery"] = battery
+                    cache["is_charging"] = is_charging
 
         # Idle time (OpenRazer returns seconds 60..900; UI presents minutes 1..15)
         idle_time = None
         low_battery_threshold = None
         if rdevice.has("idle_time") or rdevice.has("get_idle_time"):
-            try:
-                raw_idle = int(rdevice.get_idle_time())
-                if raw_idle > 0:
-                    idle_time = max(1, min(15, round(raw_idle / 60))) if raw_idle > 15 else raw_idle
-                    cache["idle_time"] = idle_time
-                else:
-                    idle_time = cache.get("idle_time", 5)
-            except Exception:
-                idle_time = cache.get("idle_time", 5)
+            if "idle_time" in cache:
+                idle_time = cache["idle_time"]
+            else:
+                try:
+                    raw_idle = int(rdevice.get_idle_time())
+                    if raw_idle > 0:
+                        idle_time = max(1, min(15, round(raw_idle / 60))) if raw_idle > 15 else raw_idle
+                    else:
+                        idle_time = 5
+                except Exception:
+                    idle_time = 5
+                cache["idle_time"] = idle_time
 
         if rdevice.has("low_battery_threshold") or rdevice.has("get_low_battery_threshold"):
-            try:
-                raw_thresh = int(rdevice.get_low_battery_threshold())
-                if raw_thresh > 0:
-                    low_battery_threshold = raw_thresh
-                    cache["low_battery_threshold"] = low_battery_threshold
-                else:
-                    low_battery_threshold = cache.get("low_battery_threshold", 15)
-            except Exception:
-                low_battery_threshold = cache.get("low_battery_threshold", 15)
+            if "low_battery_threshold" in cache:
+                low_battery_threshold = cache["low_battery_threshold"]
+            else:
+                try:
+                    raw_thresh = int(rdevice.get_low_battery_threshold())
+                    if raw_thresh > 0:
+                        low_battery_threshold = raw_thresh
+                    else:
+                        low_battery_threshold = 15
+                except Exception:
+                    low_battery_threshold = 15
+                cache["low_battery_threshold"] = low_battery_threshold
 
         # DPI
         has_dpi = rdevice.has("dpi")
@@ -1223,33 +1279,31 @@ class RazerBridge:
         dpi_stages = None
         active_dpi_stage = cache.get("active_dpi_stage", 1)
         if has_dpi:
-            try:
-                max_dpi = int(rdevice.max_dpi)
-            except Exception:
-                max_dpi = 30000
+            if "max_dpi" in cache:
+                max_dpi = cache["max_dpi"]
+            else:
+                try:
+                    max_dpi = int(rdevice.max_dpi)
+                except Exception:
+                    max_dpi = 30000
+                cache["max_dpi"] = max_dpi
 
-            recent_dpi_write = (time.time() - cache.get("last_dpi_write", 0)) < 6.0
-
-            if recent_dpi_write and "dpi" in cache:
+            if "dpi" in cache:
                 dpi = cache["dpi"]
             else:
                 try:
                     hw_dpi = list(rdevice.dpi)
                     if hw_dpi and hw_dpi[0] > 0:
                         dpi = [int(hw_dpi[0]), int(hw_dpi[1])]
-                        cache["dpi"] = dpi
-                    elif "dpi" in cache:
-                        dpi = cache["dpi"]
-                    elif "dpi_x" in p_sec:
-                        dpi = [int(p_sec.get("dpi_x", 1600)), int(p_sec.get("dpi_y", 1600))]
-                        cache["dpi"] = dpi
+                    elif "dpi_x" in p_sec and int(p_sec.get("dpi_x", 0)) > 0:
+                        dpi = [int(p_sec.get("dpi_x", 800)), int(p_sec.get("dpi_y", 800))]
                     else:
-                        dpi = [1600, 1600]
+                        dpi = [800, 800]
                 except Exception:
-                    dpi = cache.get("dpi", [1600, 1600])
+                    dpi = [800, 800]
+                cache["dpi"] = dpi
 
-            # Read hardware DPI stages if supported and awake, unless user just mutated DPI/stages
-            if recent_dpi_write and "dpi_stages" in cache:
+            if "dpi_stages" in cache:
                 dpi_stages = cache["dpi_stages"]
                 active_dpi_stage = cache.get("active_dpi_stage", 1)
             elif rdevice.has("dpi_stages"):
@@ -1259,57 +1313,63 @@ class RazerBridge:
                     if valid_stages:
                         dpi_stages = valid_stages
                         active_dpi_stage = int(st_active) if int(st_active) > 0 else 1
-                        cache["dpi_stages"] = dpi_stages
-                        cache["active_dpi_stage"] = active_dpi_stage
                 except Exception:
                     pass
 
             if not dpi_stages:
-                if "dpi_stages" in cache:
-                    dpi_stages = cache["dpi_stages"]
-                else:
-                    dpi_stages = [[400, 400], [800, 800], [1600, 1600], [3200, 3200], [6400, 6400]]
-                    for idx, st in enumerate(dpi_stages):
-                        if dpi and st[0] == dpi[0]:
-                            active_dpi_stage = idx + 1
+                dpi_stages = [[400, 400], [800, 800], [1600, 1600], [3200, 3200], [6400, 6400]]
+                for idx, st in enumerate(dpi_stages):
+                    if dpi and st[0] == dpi[0]:
+                        active_dpi_stage = idx + 1
+            cache["dpi_stages"] = dpi_stages
+            cache["active_dpi_stage"] = active_dpi_stage
 
         # Poll rate
         has_poll_rate = rdevice.has("poll_rate")
         poll_rate = None
         supported_poll_rates = []
         if has_poll_rate:
-            try:
-                hw_rate = int(rdevice.poll_rate)
-                if hw_rate > 0:
-                    poll_rate = hw_rate
-                    cache["poll_rate"] = poll_rate
-                elif "poll_rate" in cache:
-                    poll_rate = cache["poll_rate"]
-                elif "poll_rate" in p_sec and int(p_sec["poll_rate"]) > 0:
-                    poll_rate = int(p_sec["poll_rate"])
-                    cache["poll_rate"] = poll_rate
-                else:
+            if "poll_rate" in cache:
+                poll_rate = cache["poll_rate"]
+            else:
+                try:
+                    hw_rate = int(rdevice.poll_rate)
+                    if hw_rate > 0:
+                        poll_rate = hw_rate
+                    elif "poll_rate" in p_sec and int(p_sec["poll_rate"]) > 0:
+                        poll_rate = int(p_sec["poll_rate"])
+                    else:
+                        poll_rate = 1000
+                except Exception:
                     poll_rate = 1000
-            except Exception:
-                poll_rate = cache.get("poll_rate", 1000)
+                cache["poll_rate"] = poll_rate
 
-            if rdevice.has("supported_poll_rates"):
+            if "supported_poll_rates" in cache:
+                supported_poll_rates = cache["supported_poll_rates"]
+            elif rdevice.has("supported_poll_rates"):
                 try:
                     supported_poll_rates = [int(r) for r in rdevice.supported_poll_rates]
                 except Exception:
                     supported_poll_rates = [125, 500, 1000]
+                cache["supported_poll_rates"] = supported_poll_rates
             else:
                 supported_poll_rates = [125, 500, 1000]
+                cache["supported_poll_rates"] = supported_poll_rates
 
         # Brightness
         has_brightness = rdevice.has("brightness")
         brightness = None
         if has_brightness:
-            try:
-                brightness = round(float(rdevice.brightness))
+            if "brightness" in cache:
+                brightness = cache["brightness"]
+            else:
+                try:
+                    brightness = round(float(rdevice.brightness))
+                    if brightness <= 0:
+                        brightness = 100
+                except Exception:
+                    brightness = 100
                 cache["brightness"] = brightness
-            except Exception:
-                brightness = cache.get("brightness", 100)
 
         # Matrix
         has_matrix = rdevice.has("lighting_led_matrix")
@@ -1344,6 +1404,23 @@ class RazerBridge:
             "zones": []
         }
         cache["lighting"] = lighting_state
+        if has_lighting and "user_set_lighting" not in cache:
+            cache["user_set_lighting"] = True
+
+        # Ensure ARGB controller animator is running if device has active lighting
+        if self._is_argb_controller(rdevice) and serial not in self.argb_animators:
+            eff = lighting_state.get("current_effect", "static")
+            if eff != "none":
+                cols_hex = lighting_state.get("colors", ["#fafafa", "#4ade80"])
+                rgb_cols = [self._hex_to_rgb(c) for c in cols_hex]
+                self._drive_argb_effect(
+                    rdevice,
+                    eff,
+                    rgb_cols,
+                    lighting_state.get("speed", "normal"),
+                    lighting_state.get("direction", "right"),
+                    lighting_state.get("breath_mode", "single")
+                )
 
         # Button Remapping support (for Razer mice)
         evdev_paths = self._find_evdev_paths_for_device(rdevice.name)
@@ -1406,13 +1483,15 @@ class RazerBridge:
 
     def list_devices(self):
         devices = []
-        if not self.devman:
-            self._init_openrazer()
+        self._ensure_openrazer_ready()
 
         if self.devman:
             try:
                 for rdev in self.devman.devices:
                     devices.append(self._serialize_device(rdev))
+                if devices and not os.path.exists(self.settings_file):
+                    self._save_device_settings()
+                    self._save_lighting_state()
             except Exception as e:
                 sys.stderr.write(f"Error listing devices: {e}\n")
 
@@ -1423,8 +1502,7 @@ class RazerBridge:
         return devices
 
     def _find_rdevice(self, serial):
-        if not self.devman:
-            self._init_openrazer()
+        self._ensure_openrazer_ready()
         if not self.devman:
             return None
         for d in self.devman.devices:
@@ -1537,21 +1615,18 @@ class RazerBridge:
     def set_brightness(self, serial, brightness, zone=None):
         brightness = max(0.0, min(100.0, float(brightness)))
         rdev = self._find_rdevice(serial)
+        self.device_state_cache.setdefault(serial, {})["brightness"] = round(brightness)
         if rdev:
             try:
-                if zone and zone not in ("overall", "main"):
-                    ztarget = self._resolve_fx_zone(rdev, zone)
-                    if ztarget and hasattr(ztarget, "brightness"):
-                        ztarget.brightness = brightness
-                elif rdev.has("brightness"):
-                    rdev.brightness = brightness
-                if self._is_argb_controller(rdev) and serial not in self.argb_animators:
-                    last_rows = self.device_state_cache.get(serial, {}).get("last_argb_rows")
-                    if last_rows:
-                        self._write_argb_raw_rows(serial, last_rows)
+                if not self._is_argb_controller(rdev):
+                    if zone and zone not in ("overall", "main"):
+                        ztarget = self._resolve_fx_zone(rdev, zone)
+                        if ztarget and hasattr(ztarget, "brightness"):
+                            ztarget.brightness = brightness
+                    elif rdev.has("brightness"):
+                        rdev.brightness = brightness
             except Exception as e:
                 sys.stderr.write(f"Error setting brightness: {e}\n")
-        self.device_state_cache.setdefault(serial, {})["brightness"] = round(brightness)
         self._save_device_settings()
         return {"status": "ok", "brightness": round(brightness)}
 
@@ -1575,16 +1650,6 @@ class RazerBridge:
                             cache["channel_sizes"][channel - 1] = sz_val
                         if "channels" in cache and 1 <= channel <= len(cache["channels"]):
                             cache["channels"][channel - 1]["size"] = sz_val
-                    # Re-apply current ARGB frame if not animated so hardware register writes don't clear LEDs
-                    if self._is_argb_controller(rdev) and serial not in self.argb_animators:
-                        last_rows = cache.get("last_argb_rows")
-                        if last_rows:
-                            self._write_argb_raw_rows(serial, last_rows)
-                        else:
-                            cache_l = cache.get("lighting", {})
-                            eff = cache_l.get("current_effect", "static")
-                            cols = [self._hex_to_rgb(c) for c in cache_l.get("colors", ["#fafafa", "#4ade80"])]
-                            self._drive_argb_effect(rdev, eff, cols)
             except Exception as e:
                 sys.stderr.write(f"Error configuring ARGB channel {channel}: {e}\n")
                 return {"status": "error", "message": str(e)}
@@ -1599,31 +1664,37 @@ class RazerBridge:
         return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
 
     def set_effect(self, serial, effect, colors=None, speed="normal", direction="right", zone="overall", breath_mode="single"):
-        colors = colors or ["#fafafa", "#4ade80"]
+        colors = [str(c) for c in (colors or ["#fafafa", "#4ade80"])]
         while len(colors) < 2:
             colors.append("#4ade80")
         rgb_colors = [self._hex_to_rgb(c) for c in colors]
         rdev = self._find_rdevice(serial)
+        cache = self.device_state_cache.setdefault(serial, {})
 
         if rdev and getattr(rdev, "fx", None):
-            # If user enables an active lighting effect while device brightness was near 0 (e.g. 9% or muted),
-            # raise brightness to 100% so the LEDs are visibly illuminated.
-            if effect != "none" and rdev.has("brightness"):
-                try:
-                    if float(rdev.brightness) < 10.0:
-                        rdev.brightness = 100.0
-                        self.device_state_cache.setdefault(serial, {})["brightness"] = 100
-                except Exception:
-                    pass
-
             # For the Razer Chroma Addressable RGB Controller (1532:0F1F), drive all 6 ARGB channels directly
             # via per-channel custom frames / software animator to bypass the kernel driver's ZERO_LED and single-row bugs.
             if self._is_argb_controller(rdev):
+                if effect != "none" and cache.get("brightness", 100) < 10:
+                    cache["brightness"] = 100
                 try:
                     self._drive_argb_effect(rdev, effect, rgb_colors, speed, direction, breath_mode)
                 except Exception as e:
                     sys.stderr.write(f"Error driving ARGB controller {serial}: {e}\n")
             else:
+                # Always ensure hardware brightness is written when turning on an effect
+                # (on wireless mice like Pro Click V2 Vertical, openrazer's get_brightness returns cached persistence
+                # even if hardware LED brightness register was dimmed or zeroed).
+                if effect != "none" and rdev.has("brightness"):
+                    try:
+                        target_br = float(cache.get("brightness", 100))
+                        if target_br < 10.0:
+                            target_br = 100.0
+                            cache["brightness"] = 100
+                        rdev.brightness = target_br
+                    except Exception:
+                        pass
+
                 fx_target = self._resolve_fx_zone(rdev, zone)
                 speed_map = {"fast": 1, "normal": 2, "slow": 3, "ultra": 4}
                 spd = speed_map.get(speed, 2)
@@ -1685,7 +1756,6 @@ class RazerBridge:
                 except Exception as e:
                     sys.stderr.write(f"Error applying effect {effect} on {serial}: {e}\n")
 
-        cache = self.device_state_cache.setdefault(serial, {})
         cache["user_set_lighting"] = True
         lighting_cache = cache.setdefault("lighting", {})
         lighting_cache.update({
@@ -1707,9 +1777,9 @@ class RazerBridge:
 
         try:
             self._stop_argb_animator(serial)
-            if rdev.has("brightness") and float(rdev.brightness) < 10.0:
-                rdev.brightness = 100.0
-                self.device_state_cache.setdefault(serial, {})["brightness"] = 100
+            cache = self.device_state_cache.setdefault(serial, {})
+            if cache.get("brightness", 100) < 10:
+                cache["brightness"] = 100
 
             hw_rows = int(rdev.fx.advanced.rows)
             hw_cols = int(rdev.fx.advanced.cols)
@@ -1733,8 +1803,13 @@ class RazerBridge:
                         rgb = row_rgb_list[c_idx] if c_idx < len(row_rgb_list) else row_rgb_list[-1]
                         full_row.extend(rgb)
                     raw_rows.append(bytes(full_row))
-                self._write_argb_raw_rows(serial, raw_rows, latch_custom=True)
+                self._drive_argb_effect(rdev, "matrix", [(250, 250, 250)], custom_rows=raw_rows)
             else:
+                if rdev.has("brightness"):
+                    try:
+                        rdev.brightness = float(cache.get("brightness", 100))
+                    except Exception:
+                        pass
                 rdev.fx.advanced.matrix.reset()
                 for r_idx in range(min(hw_rows, len(grid))):
                     row_cells = grid[r_idx]
@@ -1749,9 +1824,10 @@ class RazerBridge:
                         rdev.fx.advanced.matrix[r_idx, c_idx] = rgb
                 rdev.fx.advanced.draw()
 
-            cache = self.device_state_cache.setdefault(serial, {})
             cache["user_set_lighting"] = True
             cache.setdefault("lighting", {})["current_effect"] = "matrix"
+            self._save_lighting_state()
+            self._save_device_settings()
             return {"status": "ok", "rows": hw_rows, "cols": hw_cols}
         except Exception as e:
             sys.stderr.write(f"Error applying custom matrix on {serial}: {e}\n")
@@ -1815,7 +1891,7 @@ class RazerBridge:
     def get_autostart(self):
         autostart_desktop = os.path.expanduser("~/.config/autostart/razerd.desktop")
         systemd_service = os.path.expanduser("~/.config/systemd/user/razerd.service")
-        enabled = os.path.exists(autostart_desktop) or os.path.exists(systemd_service)
+        enabled = os.path.exists(systemd_service) or os.path.exists(autostart_desktop)
         return {"status": "ok", "enabled": enabled}
 
     def set_autostart(self, enabled=True, start_minimized=True):
@@ -1825,7 +1901,6 @@ class RazerBridge:
         autostart_desktop = os.path.join(autostart_dir, "razerd.desktop")
         systemd_service = os.path.join(systemd_dir, "razerd.service")
         launcher_bin = os.path.expanduser("~/.local/bin/razerd")
-        icon_path = os.path.expanduser("~/.local/share/icons/hicolor/scalable/apps/razerd.svg")
         flag = " --minimized" if start_minimized else ""
 
         # Always ensure Polychromatic autostart stays disabled so it doesn't conflict
@@ -1841,32 +1916,23 @@ class RazerBridge:
 
         if enabled:
             try:
-                os.makedirs(autostart_dir, exist_ok=True)
-                desktop_content = (
-                    "[Desktop Entry]\n"
-                    "Version=1.0\n"
-                    "Type=Application\n"
-                    "Name=RazerD Autostart\n"
-                    "Comment=Start RazerD minimized in system tray and restore hardware settings\n"
-                    f"Exec={launcher_bin}{flag}\n"
-                    f"Icon={icon_path}\n"
-                    "Terminal=false\n"
-                    "Categories=Settings;HardwareSettings;Utility;\n"
-                    "StartupWMClass=razerd\n"
-                    "X-GNOME-Autostart-enabled=true\n"
-                )
-                with open(autostart_desktop, "w") as f:
-                    f.write(desktop_content)
+                # Remove duplicate XDG autostart desktop file so systemd user service is the single clean launcher
+                if os.path.exists(autostart_desktop):
+                    try:
+                        os.remove(autostart_desktop)
+                    except Exception:
+                        pass
 
                 os.makedirs(systemd_dir, exist_ok=True)
                 service_content = (
                     "[Unit]\n"
                     "Description=RazerD Background Hardware Controller & Tray Applet\n"
                     "PartOf=graphical-session.target\n"
-                    "After=graphical-session.target openrazer-daemon.service\n"
+                    "After=graphical-session.target openrazer-daemon.service waybar.service\n"
                     "Wants=openrazer-daemon.service\n\n"
                     "[Service]\n"
                     "Type=simple\n"
+                    "ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do busctl --user list 2>/dev/null | grep -q \"StatusNotifierWatcher\" && busctl --user list 2>/dev/null | grep -q \"org.razer\" && break; sleep 0.5; done'\n"
                     f"ExecStart={launcher_bin}{flag}\n"
                     "Restart=on-failure\n"
                     "RestartSec=3\n\n"
@@ -1927,7 +1993,8 @@ class RazerBridge:
                     pass
             subprocess.run(["systemctl", "--user", "restart", "openrazer-daemon.service"], check=False)
             time.sleep(1.0)
-            self._init_openrazer()
+            self._settings_restored = False
+            self._ensure_openrazer_ready()
             return {"status": "ok", "restarted": True}
         except Exception as e:
             return {"status": "error", "message": str(e)}

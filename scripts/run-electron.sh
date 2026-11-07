@@ -22,4 +22,4 @@ else
   ELECTRON_BIN="${PROJECT_DIR}/node_modules/.bin/electron"
 fi
 
-exec "${ELECTRON_BIN}" "${PROJECT_DIR}" --class=razerd --ozone-platform-hint=auto "$@"
+exec "${ELECTRON_BIN}" --class=razerd --ozone-platform-hint=auto "${PROJECT_DIR}" "$@"

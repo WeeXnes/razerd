@@ -1,7 +1,16 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+function toPlainData(value) {
+  if (value === undefined || value === null) return {};
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return value;
+  }
+}
+
 contextBridge.exposeInMainWorld('razerAPI', {
-  call: (action, params) => ipcRenderer.invoke('razer:call', action, params),
+  call: (action, params) => ipcRenderer.invoke('razer:call', action, toPlainData(params)),
   onStatus: (callback) => {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('razer:status', handler);

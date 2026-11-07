@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const readline = require('readline');
 
 app.setName('razerd');
@@ -141,18 +141,38 @@ function createTray() {
     img = img.resize({ width: 22, height: 22 });
   }
 
-  tray = new Tray(img);
-  tray.setToolTip('RazerD — Razer Hardware & Chroma Control');
+  try {
+    tray = new Tray(img);
+    tray.setToolTip('RazerD — Razer Hardware & Chroma Control');
 
-  tray.on('click', () => {
-    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
-      mainWindow.hide();
+    tray.on('click', () => {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+        mainWindow.hide();
+      } else {
+        showMainWindow();
+      }
+    });
+
+    updateTrayMenu();
+  } catch (err) {
+    console.error('Failed to create system tray:', err);
+  }
+}
+
+function ensureTrayWhenWatcherReady(retriesLeft = 30) {
+  if (tray) return;
+  if (process.platform !== 'linux') {
+    createTray();
+    return;
+  }
+  execFile('busctl', ['--user', 'list'], { timeout: 1500 }, (err, stdout) => {
+    const hasWatcher = !err && typeof stdout === 'string' && stdout.includes('StatusNotifierWatcher');
+    if (hasWatcher || retriesLeft <= 0) {
+      createTray();
     } else {
-      showMainWindow();
+      setTimeout(() => ensureTrayWhenWatcherReady(retriesLeft - 1), 500);
     }
   });
-
-  updateTrayMenu();
 }
 
 async function updateTrayMenu() {
@@ -221,7 +241,7 @@ function createWindow(hidden = false) {
     backgroundColor: '#000000',
     title: 'razerd',
     icon: fs.existsSync(iconPath) ? iconPath : undefined,
-    show: false,
+    show: !hidden,
     frame: true,
     autoHideMenuBar: true,
     titleBarStyle: 'default',
@@ -244,8 +264,9 @@ function createWindow(hidden = false) {
   }
 
   mainWindow.once('ready-to-show', () => {
-    if (!hidden) {
+    if (!hidden && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
+      mainWindow.focus();
     }
   });
 
@@ -292,25 +313,35 @@ ipcMain.handle('window:isMaximized', () => {
 // Periodic background polling for battery / hotplug
 let pollTimer = null;
 function startDevicePolling() {
+  // Always run an initial device discovery + hardware settings restore on startup,
+  // even when started minimized in the system tray without an open window.
+  callBridge('list_devices').catch(() => {});
+
   pollTimer = setInterval(async () => {
     if (inFlightMutations > 0 || Date.now() - lastMutationAt < 4000) {
       return;
     }
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        const devices = await callBridge('list_devices');
-        if (inFlightMutations === 0 && Date.now() - lastMutationAt >= 4000 && mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('razer:deviceUpdate', devices);
-        }
-      } catch {}
-    }
-  }, 4500);
+    try {
+      const devices = await callBridge('list_devices');
+      if (
+        inFlightMutations === 0 &&
+        Date.now() - lastMutationAt >= 4000 &&
+        mainWindow &&
+        !mainWindow.isDestroyed() &&
+        mainWindow.isVisible()
+      ) {
+        mainWindow.webContents.send('razer:deviceUpdate', devices);
+      }
+    } catch {}
+  }, 6000);
 }
 
 app.whenReady().then(() => {
   startPythonBridge();
-  createTray();
-  createWindow(startMinimized);
+  ensureTrayWhenWatcherReady();
+  if (!startMinimized) {
+    createWindow(false);
+  }
   startDevicePolling();
 
   app.on('activate', () => {
@@ -319,7 +350,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (!isQuitting && tray) {
+  if (!isQuitting && (tray || startMinimized)) {
     return;
   }
   if (pollTimer) clearInterval(pollTimer);
