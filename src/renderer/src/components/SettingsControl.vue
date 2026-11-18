@@ -44,7 +44,7 @@ function onScreensaverToggle() {
       <div class="setting-row">
         <div class="setting-info">
           <span class="setting-title">Autostart Minimized in System Tray</span>
-          <span class="setting-hint">Launch RazerD silently in the system tray at desktop login, disable Polychromatic autostart, and automatically restore your saved hardware profile & lighting.</span>
+          <span class="setting-hint">Launch RazerD silently in the system tray at desktop login, keep other RGB tray apps from starting alongside it, and automatically restore your saved hardware profile & lighting.</span>
         </div>
         <label class="switch">
           <input
@@ -101,7 +101,7 @@ function onScreensaverToggle() {
       </div>
       <p class="about-desc">
         Modern Linux native peripheral control suite for Razer hardware.
-        Reworked from the Polychromatic project on top of the OpenRazer driver stack,
+        Built on the OpenRazer driver stack,
         crafted with high-precision monochrome ergonomics following the OpenProStreet design philosophy.
       </p>
       <div class="about-meta micro">

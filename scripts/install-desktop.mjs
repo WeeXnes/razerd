@@ -102,7 +102,7 @@ Path=${projectDir}
 Icon=${iconDestPath}
 Terminal=false
 Categories=Settings;HardwareSettings;Utility;System;
-Keywords=razer;razerd;openrazer;rgb;chroma;dpi;mouse;keyboard;polychromatic;led;
+Keywords=razer;razerd;openrazer;rgb;chroma;dpi;mouse;keyboard;led;
 StartupWMClass=razerd
 StartupNotify=true
 `;

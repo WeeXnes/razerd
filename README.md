@@ -2,7 +2,7 @@
 
 A modern, high-precision Linux native peripheral management suite for Razer hardware, built on top of [OpenRazer](https://openrazer.github.io).
 
-Re-engineered from [Polychromatic](https://polychromatic.app) into a native Electron desktop application, following the monochrome, typography-led design system defined in `DESIGN.md` (OpenProStreet design principles).
+A native Electron desktop application following the monochrome, typography-led design system defined in `DESIGN.md` (OpenProStreet design principles).
 
 ---
 
@@ -109,4 +109,4 @@ VITE_DEV_SERVER_URL=http://localhost:5173 electron .
 
 ## License
 
-GPL-3.0-or-later. Derived and re-architected from Polychromatic.
+GPL-3.0-or-later, see [LICENSE](LICENSE). Based in part on Polychromatic (GPL-3.0-or-later).
