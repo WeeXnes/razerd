@@ -11,8 +11,7 @@
 
 ---
 
-A high-precision, native Electron desktop application following the monochrome, typography-led design system defined in
-`DESIGN.md` (OpenProStreet design principles).
+A high-precision, native Electron desktop application with a monochrome, typography-led interface.
 
 ## Features
 
